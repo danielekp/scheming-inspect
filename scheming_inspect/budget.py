@@ -8,7 +8,10 @@ that an unlogged remote request did not happen.
 
 Unknown charges, incomplete logs, missing IDs, or failed billing checks block all new
 reservations. Known costs are still saved, but the full reservation remains until
-the batch is reconciled successfully. JSON writes use fsync + atomic replacement;
+the batch is reconciled successfully. An explicitly audited, stopped batch may
+instead be closed with its full reservation permanently retained. Such closure
+does not establish its actual cost and cannot be silently settled or rerun.
+JSON writes use fsync + atomic replacement;
 an advisory file lock serializes independent campaign processes on this host.
 No API key or raw provider response is persisted. Billing GETs never generate
 model output and have bounded retries for eventually available metadata.
@@ -203,11 +206,27 @@ def _validate_state(state: dict[str, Any]) -> None:
             if _money(amount) <= 0:
                 raise BudgetError("Invalid stage budget.")
         for batch_id, batch in state["batches"].items():
-            if batch["id"] != batch_id or batch["status"] not in {"reserved", "blocked", "settled"}:
+            if batch["id"] != batch_id or batch["status"] not in {
+                "reserved",
+                "blocked",
+                "settled",
+                "closed_reserved",
+            }:
                 raise BudgetError("Invalid batch identity/status.")
             if not isinstance(batch["stage"], str):
                 raise BudgetError("Invalid batch stage.")
             _money(batch["upper_usd"])
+            if batch["status"] == "closed_reserved":
+                closure = batch.get("closure", {})
+                if (
+                    closure.get("process_stopped") is not True
+                    or not isinstance(closure.get("reason"), str)
+                    or not closure["reason"].strip()
+                    or closure.get("evidence", {}).get("bounded_execution_confirmed") is not True
+                    or closure.get("log_fingerprints") != batch.get("log_fingerprints")
+                    or not closure.get("log_fingerprints")
+                ):
+                    raise BudgetError("Closed reservation has missing or invalid audit evidence.")
         covered = Decimal(0)
         for response_id, row in state["generations"].items():
             if not response_id.startswith("gen-"):
@@ -239,6 +258,8 @@ def collect_generation_ids(log_paths: Sequence[str | Path]) -> dict[str, Any]:
     cached = 0
     event_count = 0
     samples = 0
+    logs_read = 0
+    retries_observed = False
     fingerprints = {}
     paths = sorted({Path(raw).expanduser().resolve() for raw in log_paths})
     if not paths:
@@ -253,6 +274,7 @@ def collect_generation_ids(log_paths: Sequence[str | Path]) -> dict[str, Any]:
         except Exception as exc:
             errors.append(f"Log unreadable ({type(exc).__name__}); accounting is incomplete.")
             continue
+        logs_read += 1
         if getattr(log, "status", None) not in {"success", "error", "cancelled"}:
             errors.append("A source evaluation has no terminal status.")
         elif log.status == "cancelled":
@@ -268,6 +290,7 @@ def collect_generation_ids(log_paths: Sequence[str | Path]) -> dict[str, Any]:
             if getattr(sample, "error", None) or getattr(sample, "invalidation", None):
                 warnings.append("A source sample has an error or invalidation.")
             if getattr(sample, "error_retries", None):
+                retries_observed = True
                 errors.append(
                     "A source sample was retried; earlier attempt charges may be unrepresented."
                 )
@@ -286,6 +309,7 @@ def collect_generation_ids(log_paths: Sequence[str | Path]) -> dict[str, Any]:
                         "A model request failed or remains pending; charges may be unknown."
                     )
                 if (getattr(event, "retries", 0) or 0) > 0:
+                    retries_observed = True
                     errors.append(
                         "A model request retried; unrepresented attempt charges are possible."
                     )
@@ -301,6 +325,8 @@ def collect_generation_ids(log_paths: Sequence[str | Path]) -> dict[str, Any]:
         "cached_events_excluded": cached,
         "model_events": event_count,
         "samples": samples,
+        "logs_read": logs_read,
+        "retries_observed": retries_observed,
         "log_fingerprints": fingerprints,
     }
 
@@ -404,6 +430,7 @@ class CampaignLedger:
                 "starting_spend_usd": float(_money(state["starting_spend_usd"])),
                 "committed_usd": float(committed),
                 "verified_usd": float(verified),
+                "retained_reservation_usd": float(committed - verified),
                 "remaining_usd": float(max(Decimal(0), _money(state["limit_usd"]) - committed)),
                 "stages": {
                     key: {
@@ -420,7 +447,12 @@ class CampaignLedger:
             }
 
     def pending(self) -> list[dict[str, Any]]:
-        return [row for row in self.snapshot()["batches"].values() if row["status"] != "settled"]
+        """Active accounting blockers; closed reservations still consume budget."""
+        return [
+            row
+            for row in self.snapshot()["batches"].values()
+            if row["status"] in {"reserved", "blocked"}
+        ]
 
     def reserve(
         self,
@@ -446,7 +478,9 @@ class CampaignLedger:
                 raise BatchAlreadyExists(
                     "Batch ID already exists; reconcile it instead of rerunning it."
                 )
-            if any(batch["status"] != "settled" for batch in state["batches"].values()):
+            if any(
+                batch["status"] in {"reserved", "blocked"} for batch in state["batches"].values()
+            ):
                 raise BudgetError(
                     "An unresolved batch retains its reservation; reconcile it before more work."
                 )
@@ -469,6 +503,79 @@ class CampaignLedger:
             self._save(state)
             return self._batch_view(state, batch_id)
 
+    def close_with_reservation(
+        self,
+        batch_id: str,
+        logs: Sequence[str | Path],
+        *,
+        reason: str,
+        process_stopped: bool,
+        evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Close stopped work without releasing a cent of its original ceiling.
+
+        This is an explicit audited recovery operation, never an automatic error
+        handler. The caller must verify the worker has stopped and include
+        ``bounded_execution_confirmed=True`` in evidence after checking that the
+        original rate/token caps and no-retry policy covered every request.
+        Logs must match the last blocked reconciliation exactly. The closure is
+        permanent in this API: ``settle`` cannot convert it to a known actual cost.
+        Existing generation IDs, verified amounts, and error diagnostics remain.
+        """
+        if process_stopped is not True or not isinstance(reason, str) or not reason.strip():
+            raise BudgetError(
+                "Closure requires an explicit stopped-process confirmation and reason."
+            )
+        if (
+            not isinstance(evidence, dict)
+            or evidence.get("bounded_execution_confirmed") is not True
+        ):
+            raise BudgetError("Closure requires evidence confirming the original execution bound.")
+        try:
+            audit_evidence = json.loads(json.dumps(evidence, allow_nan=False))
+        except (ValueError, TypeError) as exc:
+            raise BudgetError("Closure evidence must be JSON-serializable.") from exc
+        with self._lock():
+            state = self._load()
+            if batch_id not in state["batches"]:
+                raise BudgetError("Cannot close an unreserved batch.")
+            batch = state["batches"][batch_id]
+            if batch["status"] != "blocked":
+                raise BudgetError("Only a blocked, previously reconciled batch may be closed.")
+            observed = collect_generation_ids(logs)
+            fingerprints = observed["log_fingerprints"]
+            if (
+                not fingerprints
+                or fingerprints != batch.get("log_fingerprints")
+                or observed["logs_read"] != len(fingerprints)
+            ):
+                raise BudgetError(
+                    "Closure logs are missing, unreadable, or changed since reconciliation."
+                )
+            if set(observed["ids"]) != set(batch.get("generation_ids", [])):
+                raise BudgetError(
+                    "Closure generation IDs differ from recorded reconciliation evidence."
+                )
+            if observed["retries_observed"]:
+                raise BudgetError(
+                    "Recorded retries undermine the original bound; closure is refused."
+                )
+            if _owned_cost(state, batch_id) > _money(batch["upper_usd"]):
+                raise BudgetError("Known charges exceed the original bound; closure is refused.")
+            batch["closure"] = {
+                "closed_at": _now(),
+                "reason": reason.strip(),
+                "process_stopped": True,
+                "evidence": audit_evidence,
+                "log_fingerprints": dict(fingerprints),
+                "generation_ids": list(batch.get("generation_ids", [])),
+                "accounting_errors": list(observed["errors"]),
+                "retention_policy": "permanent_full_original_reservation",
+            }
+            batch["status"] = "closed_reserved"
+            self._save(state)
+            return self._batch_view(state, batch_id)
+
     def settle(
         self,
         batch_id: str,
@@ -484,9 +591,9 @@ class CampaignLedger:
             if batch_id not in state["batches"]:
                 raise BudgetError("Cannot settle a batch that was never reserved.")
             batch = state["batches"][batch_id]
-            if batch["status"] == "settled":
+            if batch["status"] in {"settled", "closed_reserved"}:
                 raise BatchAlreadyExists(
-                    "Batch is already settled; new work requires a new reservation."
+                    "Batch is terminal; its settlement/retained reservation cannot be changed."
                 )
             evidence = collect_generation_ids(logs)
             errors = list(evidence["errors"])

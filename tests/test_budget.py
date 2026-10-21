@@ -435,3 +435,195 @@ def test_small_decimal_reservations_do_not_round_around_cap(tmp_path, logs):
     ledger.settle("one", [logs()], complete=True, lookup=lookup_cost(Decimal("0.1")))
     ledger.reserve("two", "0.2")
     assert ledger.snapshot()["remaining_usd"] == 0
+
+
+def close(ledger, batch_id, paths, **kwargs):
+    args = {
+        "reason": "Worker exited; preserve the original bound for all uncertain requests.",
+        "process_stopped": True,
+        "evidence": {"bounded_execution_confirmed": True, "worker_exit_verified": "offline test"},
+    }
+    args.update(kwargs)
+    return ledger.close_with_reservation(batch_id, paths, **args)
+
+
+def test_closed_reservation_is_permanent_unknown_cost_and_survives_restart(tmp_path, logs):
+    path = tmp_path / "ledger.json"
+    ledger = CampaignLedger(path, limit_usd=5, starting_spend_usd=1, stage_limits={"base": 3})
+    ledger.reserve("uncertain", 2)
+    source = logs([event("gen-known"), event(None, pending=True)], status="error")
+    ledger.settle("uncertain", [source], complete=False, lookup=lookup_cost(0.25))
+    before = json.loads(path.read_text())
+    result = close(ledger, "uncertain", [source])
+    after = json.loads(path.read_text())
+    assert result["status"] == "closed_reserved"
+    assert result["actual_usd"] is None
+    assert result["verified_usd"] == 0.25
+    assert result["committed_usd"] == 2
+    assert after["generations"] == before["generations"]
+    for field in ("upper_usd", "generation_ids", "errors", "log_fingerprints", "metadata"):
+        assert after["batches"]["uncertain"][field] == before["batches"]["uncertain"][field]
+    resumed = CampaignLedger(path, limit_usd=5, starting_spend_usd=1, stage_limits={"base": 3})
+    assert resumed.pending() == []
+    assert resumed.snapshot()["committed_usd"] == 3
+    assert resumed.snapshot()["verified_usd"] == 1.25
+    assert resumed.snapshot()["retained_reservation_usd"] == 1.75
+    assert resumed.snapshot()["stages"]["base"]["remaining_usd"] == 1
+    with pytest.raises(BudgetExceeded, match="stage"):
+        resumed.reserve("base-too-big", "1.000000001")
+    with pytest.raises(BudgetExceeded, match="lifetime"):
+        resumed.reserve("audit-too-big", "2.000000001", stage="audit")
+    resumed.reserve("audit", 2, stage="audit")
+    resumed.settle("audit", [logs([event("gen-new")])], complete=True, lookup=lookup_cost(0.4))
+    assert resumed.snapshot()["committed_usd"] == 3.4
+    assert resumed.snapshot()["batches"]["uncertain"]["committed_usd"] == 2
+    assert resumed.snapshot()["batches"]["uncertain"]["actual_usd"] is None
+    with pytest.raises(BatchAlreadyExists):
+        resumed.reserve("uncertain", 1)
+    with pytest.raises(BatchAlreadyExists):
+        resumed.settle("uncertain", [source], complete=True, lookup=lookup_cost(0))
+    with pytest.raises(BudgetError, match="Only a blocked"):
+        close(resumed, "uncertain", [source])
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"process_stopped": False},
+        {"process_stopped": 1},
+        {"reason": " "},
+        {"evidence": {}},
+        {"evidence": {"bounded_execution_confirmed": False}},
+        {"evidence": {"bounded_execution_confirmed": 1}},
+        {"evidence": {"bounded_execution_confirmed": True, "invalid": float("nan")}},
+    ],
+)
+def test_closure_requires_explicit_json_safe_audit_evidence(tmp_path, logs, kwargs):
+    ledger = CampaignLedger(tmp_path / "ledger.json")
+    ledger.reserve("uncertain", 5)
+    source = logs()
+    ledger.settle("uncertain", [source], lookup=lookup_cost())
+    before = ledger.path.read_bytes()
+    with pytest.raises(BudgetError):
+        close(ledger, "uncertain", [source], **kwargs)
+    assert ledger.path.read_bytes() == before
+    assert ledger.pending()[0]["status"] == "blocked"
+
+
+@pytest.mark.parametrize("damage", ["changed", "missing", "extra", "empty"])
+def test_closure_requires_unchanged_reconciliation_logs(tmp_path, logs, damage):
+    ledger = CampaignLedger(tmp_path / "ledger.json")
+    ledger.reserve("uncertain", 5)
+    source = logs()
+    ledger.settle("uncertain", [source], lookup=lookup_cost())
+    paths = [source]
+    if damage == "changed":
+        source.write_text(source.read_text() + " ")
+    elif damage == "missing":
+        source.unlink()
+    elif damage == "extra":
+        paths.append(logs([event("gen-extra")]))
+    else:
+        paths = []
+    before = ledger.path.read_bytes()
+    with pytest.raises(BudgetError, match="Closure logs"):
+        close(ledger, "uncertain", paths)
+    assert ledger.path.read_bytes() == before
+
+
+def test_closure_never_starts_billing_lookup(monkeypatch, tmp_path, logs):
+    ledger = CampaignLedger(tmp_path / "ledger.json")
+    ledger.reserve("uncertain", 5)
+    source = logs()
+    ledger.settle("uncertain", [source], lookup=lambda _: None)
+    monkeypatch.setattr(budget, "fetch_generation", lambda *args, **kwargs: pytest.fail("network"))
+    closed = close(ledger, "uncertain", [source])
+    assert closed["status"] == "closed_reserved"
+    assert closed["verified_usd"] == 0
+    assert closed["committed_usd"] == 5
+
+
+@pytest.mark.parametrize("violation", ["model-retry", "sample-retry", "known-overrun"])
+def test_closure_rejects_evidence_that_undermines_the_original_ceiling(tmp_path, logs, violation):
+    ledger = CampaignLedger(tmp_path / "ledger.json")
+    ledger.reserve("uncertain", 5)
+    if violation == "model-retry":
+        source = logs([event(retries=1)])
+    elif violation == "sample-retry":
+        source = logs(retries=["earlier attempt"])
+    else:
+        source = logs()
+    cost = 6 if violation == "known-overrun" else 0.25
+    ledger.settle("uncertain", [source], lookup=lookup_cost(cost))
+    with pytest.raises(BudgetError, match="bound"):
+        close(ledger, "uncertain", [source])
+    assert ledger.pending()[0]["status"] == "blocked"
+
+
+def test_closure_cannot_change_unreconciled_or_settled_batch(tmp_path, logs):
+    ledger = CampaignLedger(tmp_path / "ledger.json")
+    source = logs()
+    with pytest.raises(BudgetError, match="unreserved"):
+        close(ledger, "missing", [source])
+    ledger.reserve("unreconciled", 5)
+    with pytest.raises(BudgetError, match="Only a blocked"):
+        close(ledger, "unreconciled", [source])
+    ledger.settle("unreconciled", [source], complete=True, lookup=lookup_cost())
+    with pytest.raises(BudgetError, match="Only a blocked"):
+        close(ledger, "unreconciled", [source])
+
+
+def test_atomic_closure_failure_keeps_the_active_blocker(monkeypatch, tmp_path, logs):
+    ledger = CampaignLedger(tmp_path / "ledger.json")
+    ledger.reserve("uncertain", 5)
+    source = logs()
+    ledger.settle("uncertain", [source], lookup=lookup_cost())
+    original = ledger.path.read_bytes()
+
+    def fail_replace(*_):
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(budget.os, "replace", fail_replace)
+    with pytest.raises(OSError):
+        close(ledger, "uncertain", [source])
+    assert ledger.path.read_bytes() == original
+    assert ledger.pending()[0]["status"] == "blocked"
+    with pytest.raises(BudgetError, match="unresolved"):
+        ledger.reserve("must-not-start", 1)
+
+
+def test_concurrent_reservations_count_the_closed_ceiling(tmp_path, logs):
+    path = tmp_path / "ledger.json"
+    ledger = CampaignLedger(path, limit_usd=10, starting_spend_usd=1)
+    ledger.reserve("uncertain", 4)
+    source = logs()
+    ledger.settle("uncertain", [source], lookup=lookup_cost(0.25))
+    close(ledger, "uncertain", [source])
+    handles = [CampaignLedger(path, limit_usd=10, starting_spend_usd=1) for _ in range(2)]
+
+    def reserve(index):
+        try:
+            handles[index].reserve(f"later-{index}", 4)
+            return "reserved"
+        except BudgetError:
+            return "blocked"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(reserve, range(2)))
+    assert sorted(results) == ["blocked", "reserved"]
+    assert ledger.snapshot()["committed_usd"] == 9
+    assert ledger.snapshot()["remaining_usd"] == 1
+    assert len(ledger.pending()) == 1
+
+
+def test_corrupt_closed_reservation_evidence_fails_closed(tmp_path, logs):
+    ledger = CampaignLedger(tmp_path / "ledger.json")
+    ledger.reserve("uncertain", 5)
+    source = logs()
+    ledger.settle("uncertain", [source], lookup=lookup_cost())
+    close(ledger, "uncertain", [source])
+    state = json.loads(ledger.path.read_text())
+    del state["batches"]["uncertain"]["closure"]
+    ledger.path.write_text(json.dumps(state))
+    with pytest.raises(BudgetError, match="audit evidence"):
+        CampaignLedger(ledger.path)

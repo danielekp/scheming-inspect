@@ -528,6 +528,34 @@ def prepare_manifest(
     return manifest
 
 
+def refresh_base_records(manifest: dict) -> None:
+    """One canonical log/sample selection per original case, including recovery."""
+    records = []
+    for batch in manifest["batches"]:
+        if batch.get("canonical_log_records") and batch["status"] == "settled":
+            records.extend(batch["canonical_log_records"])
+        elif batch.get("recovery"):
+            from .recovery import retained_record
+
+            if batch["recovery"]["retained_sample_ids"]:
+                records.append(retained_record(manifest, batch))
+        elif batch["status"] == "settled":
+            records.extend(
+                {
+                    "path": path,
+                    "cell": manifest["cells"][batch["cell_index"]],
+                    "cell_index": batch["cell_index"],
+                    "batch_id": batch["batch_id"],
+                    "expected_sample_ids": batch["sample_ids"],
+                    "log_sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+                    "recovery_retained": False,
+                }
+                for path in batch.get("log_paths", [])
+            )
+    manifest["completed_base_log_records"] = records
+    manifest["completed_base_logs"] = list(dict.fromkeys(record["path"] for record in records))
+
+
 def run_base(
     directory: Path,
     manifest: dict,
@@ -548,7 +576,21 @@ def run_base(
         log_dir = directory / "base" / batch["batch_id"]
         journal_path = log_dir / "batch.json"
         journal = read_json(journal_path) if journal_path.exists() else None
-        if journal and journal.get("status") == "settled":
+        if batch.get("recovery"):
+            from .recovery import run_recovery_batch
+
+            result = run_recovery_batch(
+                directory,
+                manifest,
+                batch,
+                ledger,
+                resume=resume,
+                bound_fn=bound_fn,
+                task_factory=task_factory,
+                eval_fn=eval_fn,
+                read_log_fn=read_log_fn,
+            )
+        elif journal and journal.get("status") == "settled":
             reservation = _ledger_batch(ledger, batch["batch_id"])
             if reservation is None or reservation.get("status") != "settled":
                 raise CampaignError("Settled batch and ledger disagree")
@@ -602,25 +644,9 @@ def run_base(
             log_paths=result.get("log_paths", []),
             sample_status_counts=result.get("sample_status_counts", {}),
         )
-        manifest["completed_base_logs"] = list(
-            dict.fromkeys(
-                path
-                for item in manifest["batches"]
-                if item["status"] == "settled"
-                for path in item.get("log_paths", [])
-            )
-        )
-        manifest["completed_base_log_records"] = [
-            {
-                "path": path,
-                "cell": manifest["cells"][item["cell_index"]],
-                "batch_id": item["batch_id"],
-                "expected_sample_ids": item["sample_ids"],
-            }
-            for item in manifest["batches"]
-            if item["status"] == "settled"
-            for path in item.get("log_paths", [])
-        ]
+        if result.get("canonical_log_records"):
+            batch["canonical_log_records"] = result["canonical_log_records"]
+        refresh_base_records(manifest)
         manifest.update(updated_at=utc_now(), status="running", current_batch=batch["batch_id"])
         if result["status"] != "settled":
             manifest.update(status=result["status"], blocker=result)
@@ -673,7 +699,10 @@ def _local_budget_summary(state: dict) -> dict:
         "pending_batches": [
             {"batch_id": key, "status": value["status"], "errors": value.get("errors", [])}
             for key, value in state["batches"].items()
-            if value["status"] != "settled"
+            if value["status"] not in {"settled", "closed_reserved"}
+        ],
+        "closed_reserved_batches": [
+            key for key, value in state["batches"].items() if value["status"] == "closed_reserved"
         ],
     }
 
@@ -683,6 +712,19 @@ def campaign_status(directory: Path) -> dict:
     manifest = read_json(directory / "manifest.json")
     counts, completed, outcomes, current = Counter(), 0, Counter(), []
     for batch in manifest["batches"]:
+        if batch.get("recovery"):
+            recovery = batch["recovery"]
+            path = directory / "recovery-attempts" / recovery["attempt_id"] / "batch.json"
+            item = read_json(path) if path.exists() else {"status": "recovery_ready"}
+            counts[item["status"]] += 1
+            completed += len(recovery["retained_sample_ids"])
+            outcomes.update(recovery["retained_status_counts"])
+            outcomes.update(item.get("sample_status_counts", {}))
+            if item["status"] == "settled":
+                completed += len(recovery["retry_sample_ids"])
+            elif item["status"] in {"reserved", "started", "returned", "interrupted", "blocked"}:
+                current.append(recovery["attempt_id"])
+            continue
         path = directory / "base" / batch["batch_id"] / "batch.json"
         item = read_json(path) if path.exists() else batch
         counts[item["status"]] += 1
@@ -748,6 +790,11 @@ def main(argv: list[str] | None = None) -> None:
             )
             if budget["pending_batches"]:
                 print("Pending billing: " + json.dumps(budget["pending_batches"]))
+            if budget["closed_reserved_batches"]:
+                print(
+                    "Stopped attempts with permanently retained reservations: "
+                    + ", ".join(budget["closed_reserved_batches"])
+                )
         if status["current_batches"]:
             print("Current batches: " + ", ".join(status["current_batches"]))
         if status["blocker"]:

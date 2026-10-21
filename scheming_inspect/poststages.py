@@ -98,116 +98,190 @@ def _stub(record: dict, messages=(), task_description="") -> f.SourceCase:
     )
 
 
+def canonical_log_records(base: dict, *, require_complete: bool = False) -> list[dict]:
+    """Normalize explicit canonical selections without changing original logs.
+
+    Legacy completed campaigns have one full log per batch. Recovery records may
+    select only a subset of a failed attempt; original cell/sample identity stays
+    unique even when the same sample ID occurs in several treatment cells.
+    """
+    batches = {batch["batch_id"]: batch for batch in base["batches"]}
+    expected = {
+        (batch["cell_index"], str(sample_id))
+        for batch in base["batches"]
+        for sample_id in batch["sample_ids"]
+    }
+    raw_records = base.get("completed_base_log_records")
+    if raw_records is None:
+        raw_records = [
+            {
+                "path": path,
+                "cell_index": batch["cell_index"],
+                "cell": base["cells"][batch["cell_index"]],
+                "batch_id": batch["batch_id"],
+                "expected_sample_ids": batch["sample_ids"],
+            }
+            for batch in base["batches"]
+            if batch["status"] == "settled"
+            for path in batch.get("log_paths", [])
+        ]
+    result, selected, paths = [], set(), set()
+    for raw in raw_records:
+        record = copy.deepcopy(raw)
+        index = record.get("cell_index", batches.get(record["batch_id"], {}).get("cell_index"))
+        if type(index) is not int or not 0 <= index < len(base["cells"]):
+            raise ValueError("Canonical log record has no valid original cell_index.")
+        if record.get("cell") != base["cells"][index]:
+            raise ValueError("Canonical log record differs from the original cell configuration.")
+        record["cell_index"] = index
+        record["path"] = str(Path(record["path"]).resolve())
+        ids = [str(value) for value in record["expected_sample_ids"]]
+        if not ids or len(set(ids)) != len(ids) or record["path"] in paths:
+            raise ValueError("Canonical log record has empty/duplicate selections or paths.")
+        identities = {(index, sample_id) for sample_id in ids}
+        if identities - expected or identities & selected:
+            raise ValueError("Canonical sample selections are unexpected or duplicated.")
+        record["expected_sample_ids"] = ids
+        record["recovery_retained"] = record.get("recovery_retained") is True
+        if record["recovery_retained"] and not record.get("log_sha256"):
+            raise ValueError("A retained recovery log requires its frozen SHA-256 fingerprint.")
+        selected.update(identities)
+        paths.add(record["path"])
+        result.append(record)
+    if require_complete and selected != expected:
+        raise ValueError(
+            "Canonical records do not cover every original campaign sample exactly once."
+        )
+    return result
+
+
+def verify_record_hash(record: dict) -> str:
+    actual = hashlib.sha256(Path(record["path"]).read_bytes()).hexdigest()
+    if record.get("log_sha256") and record["log_sha256"] != actual:
+        raise ValueError("A canonical source log differs from its frozen SHA-256 fingerprint.")
+    return actual
+
+
+def record_accepts_log(record: dict, status: str) -> bool:
+    return status == "success" or (status == "error" and record["recovery_retained"])
+
+
 def discover_sources(base: dict, model: str, read_log_fn: Callable = _read_log) -> dict:
-    """Validate every source individually; exclusions never disappear silently."""
+    """Validate canonical sources individually and retain superseded-attempt provenance."""
     if base.get("status") != "base_complete" or any(
         b["status"] != "settled" for b in base["batches"]
     ):
         raise ValueError("Post-stages require a completed, settled base campaign.")
-    records, excluded, hashes, seen = {}, [], {}, set()
+    records, excluded, recovery_excluded, hashes, seen = {}, [], [], {}, set()
     requested = Counter(
         {"audit_main": 0, "audit_remaining": 0, "fixed_sources": 0, "interrogation_sources": 0}
     )
-    paths = {str(Path(path).resolve()) for path in base["completed_base_logs"]}
-    mapped = set()
-    for batch in base["batches"]:
-        cell = base["cells"][batch["cell_index"]]
+    for selection in canonical_log_records(base, require_complete=True):
+        cell = selection["cell"]
         experiment, main = cell["experiment"], is_main_cell(cell)
         if experiment not in COVERT:
             continue
+        path, batch_id = selection["path"], selection["batch_id"]
         stage = "audit_main" if main else "audit_remaining"
-        expected = {str(value) for value in batch["sample_ids"]}
+        expected = set(selection["expected_sample_ids"])
         requested[stage] += len(expected)
         if main and experiment != "email":
             requested["fixed_sources"] += len(expected)
         if main and experiment == "oversight":
             requested["interrogation_sources"] += len(expected)
-        found = set()
-        for raw_path in batch.get("log_paths", []):
-            path = str(Path(raw_path).resolve())
-            if path not in paths or path in mapped:
-                raise ValueError("Canonical base log mapping is missing or duplicated.")
-            mapped.add(path)
-            try:
-                hashes[path] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
-                log = read_log_fn(Path(path))
-            except Exception as exc:
-                excluded.append(
-                    {
-                        "path": path,
-                        "batch_id": batch["batch_id"],
-                        "stage": stage,
-                        "reason": "unreadable_log",
-                        "error_type": type(exc).__name__,
-                    }
-                )
-                continue
-            for sample in log.samples or []:
-                identity = {
+        try:
+            hashes[path] = verify_record_hash(selection)
+            log = read_log_fn(Path(path))
+        except ValueError:
+            raise  # A tampered selection must never become an ordinary source exclusion.
+        except Exception as exc:
+            excluded.append(
+                {
                     "path": path,
-                    "sample_id": sample.id,
-                    "epoch": sample.epoch,
-                    "batch_id": batch["batch_id"],
+                    "batch_id": batch_id,
                     "stage": stage,
-                    "experiment": experiment,
-                    "main": main,
+                    "reason": "unreadable_log",
+                    "error_type": type(exc).__name__,
                 }
-                key = source_key(path, sample.id, sample.epoch)
-                reason = None
-                if str(sample.id) not in expected:
-                    reason = "unexpected_sample"
-                elif str(sample.id) in found or key in seen:
-                    reason = "duplicate_sample"
-                found.add(str(sample.id))
-                seen.add(key)
-                meta = sample.metadata or {}
-                behavior = _behavior(sample)
-                if reason is None:
-                    if str(log.eval.model) != model:
-                        reason = "source_model_mismatch"
-                    elif log.status != "success":
-                        reason = "source_log_failed"
-                    elif getattr(sample, "error", None):
-                        reason = "source_error"
-                    elif getattr(sample, "invalidation", None):
-                        reason = "source_invalidated"
-                    elif sample.epoch != 1:
-                        reason = "source_unexpected_epoch"
-                    elif behavior.get("schema_valid") == 0:
-                        reason = "source_invalid_schema"
-                    elif getattr(sample, "limit", None) or behavior.get("truncated") == 1:
-                        reason = "source_truncated"
-                    elif behavior.get("completed") != 1:
-                        reason = "source_incomplete_or_completion_unknown"
-                    elif not behavior:
-                        reason = "missing_behavior"
-                    elif not meta.get("scenario_id"):
-                        reason = "missing_scenario"
-                    elif any(meta.get(k) != cell[k] for k in cell if k != "n"):
-                        reason = "sample_cell_mismatch"
-                    else:
-                        try:
-                            f.validate_transcript(sample.messages)
-                        except (ValueError, AttributeError, TypeError):
-                            reason = "malformed_transcript"
-                if reason:
-                    excluded.append(identity | {"key": key, "reason": reason})
+            )
+            log = None
+        found = set()
+        for sample in (log.samples or []) if log else []:
+            identity = {
+                "path": path,
+                "sample_id": sample.id,
+                "epoch": sample.epoch,
+                "batch_id": batch_id,
+                "cell_index": selection["cell_index"],
+                "stage": stage,
+                "experiment": experiment,
+                "main": main,
+                "recovery_retained": selection["recovery_retained"],
+            }
+            if str(sample.id) not in expected:
+                if selection["recovery_retained"]:
+                    recovery_excluded.append(
+                        identity
+                        | {
+                            "reason": "superseded_recovery_attempt",
+                            "error": bool(sample.error),
+                            "invalidated": bool(getattr(sample, "invalidation", None)),
+                        }
+                    )
                     continue
-                records[key] = identity | {
-                    "key": key,
-                    "cell": copy.deepcopy(cell),
-                    "model": model,
-                    "scenario_id": str(meta["scenario_id"]),
-                    "flags": _flags(behavior),
-                    "condition": json.dumps(meta.get("condition", ""), sort_keys=True),
-                    "matching_context": json.dumps(
-                        {k: meta.get(k) for k in MATCH_KEYS}, sort_keys=True
-                    ),
-                }
+                raise ValueError("Unexpected sample in an ordinary canonical source log.")
+            key = source_key(path, sample.id, sample.epoch)
+            reason = None
+            if str(sample.id) in found or key in seen:
+                raise ValueError("Duplicate sample in a canonical source log.")
+            found.add(str(sample.id))
+            seen.add(key)
+            meta, behavior = sample.metadata or {}, _behavior(sample)
+            if str(log.eval.model) != model:
+                reason = "source_model_mismatch"
+            elif not record_accepts_log(selection, log.status):
+                reason = "source_log_failed"
+            elif getattr(sample, "error", None):
+                reason = "source_error"
+            elif getattr(sample, "invalidation", None):
+                reason = "source_invalidated"
+            elif sample.epoch != 1:
+                reason = "source_unexpected_epoch"
+            elif behavior.get("schema_valid") == 0:
+                reason = "source_invalid_schema"
+            elif getattr(sample, "limit", None) or behavior.get("truncated") == 1:
+                reason = "source_truncated"
+            elif behavior.get("completed") != 1:
+                reason = "source_incomplete_or_completion_unknown"
+            elif not behavior:
+                reason = "missing_behavior"
+            elif not meta.get("scenario_id"):
+                reason = "missing_scenario"
+            elif any(meta.get(k) != cell[k] for k in cell if k != "n"):
+                reason = "sample_cell_mismatch"
+            else:
+                try:
+                    f.validate_transcript(sample.messages)
+                except (ValueError, AttributeError, TypeError):
+                    reason = "malformed_transcript"
+            if reason:
+                excluded.append(identity | {"key": key, "reason": reason})
+                continue
+            records[key] = identity | {
+                "key": key,
+                "cell": copy.deepcopy(cell),
+                "model": model,
+                "scenario_id": str(meta["scenario_id"]),
+                "flags": _flags(behavior),
+                "condition": json.dumps(meta.get("condition", ""), sort_keys=True),
+                "matching_context": json.dumps(
+                    {k: meta.get(k) for k in MATCH_KEYS}, sort_keys=True
+                ),
+            }
         for sample_id in sorted(expected - found):
             excluded.append(
                 {
-                    "batch_id": batch["batch_id"],
+                    "batch_id": batch_id,
                     "sample_id": sample_id,
                     "stage": stage,
                     "experiment": experiment,
@@ -218,6 +292,7 @@ def discover_sources(base: dict, model: str, read_log_fn: Callable = _read_log) 
     return {
         "sources": records,
         "excluded": excluded,
+        "recovery_exclusions": recovery_excluded,
         "source_logs": hashes,
         "requested": dict(requested),
     }
@@ -457,6 +532,12 @@ def progress_report(manifest: dict) -> dict:
         "stages": counts,
         "requested": manifest["spec"]["discovery"]["requested"],
         "exclusions": dict(Counter(row["reason"] for row in exclusions)),
+        "recovery_exclusions": dict(
+            Counter(
+                row["reason"]
+                for row in manifest["spec"]["discovery"].get("recovery_exclusions", [])
+            )
+        ),
         "eligibility_exclusions": dict(
             Counter(f"{row['stage']}:{row['reason']}" for row in manifest["spec"]["eligibility"])
         ),

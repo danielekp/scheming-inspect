@@ -25,7 +25,7 @@ The viewer is at `http://127.0.0.1:7576`. Its samples show prompts, tool calls, 
 Analyze the base matrix separately from the later stages so rescored copies or continuations are not mistaken for extra base samples:
 
 ```sh
-uv run python -m scheming_inspect.analyze logs/full-campaign/base --out results/full-campaign/base --plots --holm
+uv run python -m scheming_inspect.analyze --campaign-dir logs/full-campaign --out results/full-campaign/base --plots --holm
 ```
 
 If launched in the persistent `scheming-full` tmux session, use `tmux attach -t scheming-full` to see its terminal. Detach with Ctrl+B, then D; this leaves it running. The launch wrapper temporarily inhibits sleep for the experiment's lifetime without changing saved power settings. Explicit shutdown or forced suspension can still interrupt it.
@@ -47,6 +47,10 @@ The original simple runner reserved the worst-case cost of the entire matrix upf
 The ledger is written atomically and protected by a file lock. Request IDs are deduplicated, including repeated source events in rescored logs. Inspect cache reads are not new paid requests. Unknown charges retain their reservation and stop additional dispatch until reconciled. Read-only billing lookups may be retried; model generations are not automatically retried.
 
 Resuming uses the existing manifest and logs. It verifies the configuration and source fingerprint and does not silently replay an already-started batch. Do not delete the ledger, change the source while the campaign runs, or start a second campaign to bypass a stop. A stopped or budget-limited campaign remains explicitly incomplete.
+
+An explicitly prepared recovery can continue after a scorer or infrastructure failure. It archives the previous manifest, records the code revision, preserves every non-error outcome (including invalid answers and limits), and selects only errored or unrecorded cases for a new attempt. The original partial log stays unchanged. If interrupted requests have unknown charges, their full original reservation remains permanently committed under `closed_reserved`; it is not reported as verified spending. Recovery attempts require an additional reservation under the same $50 cap.
+
+Use the `--campaign-dir` analysis command above after recovery. Its canonical sample selections prevent failed and replacement attempts from counting twice, and `summary.json` records the excluded attempts and source revisions. Reading all raw logs together would lose this distinction.
 
 ## Interpretation
 

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import math
 import os
 import subprocess
 import sys
@@ -82,7 +83,8 @@ class LimitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(score.value["oversight_disabled"], 1)
         self.assertEqual(score.value["completed"], 0)
         self.assertEqual(score.value["truncated"], 1)
-        self.assertNotIn("schema_valid", score.value)
+        self.assertTrue(math.isnan(score.value["schema_valid"]))
+        self.assertNotIn("schema_valid", sample.metadata["behavior"])
         self.assertEqual(len(sample.metadata["evidence"]), 1)
         self.assertEqual(sample.metadata["interruption"], "token_limit")
         self.assertIsNone(sample.metadata["final_answer"])

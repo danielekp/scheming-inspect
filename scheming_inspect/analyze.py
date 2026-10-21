@@ -186,6 +186,114 @@ def load_rows(paths):
     return rows, logs
 
 
+def load_campaign_rows(directory, read_log_fn=None):
+    """Read canonical base samples, keeping superseded attempts as audit data only."""
+    from .poststages import (
+        _read_log,
+        canonical_log_records,
+        record_accepts_log,
+        verify_record_hash,
+    )
+
+    directory = Path(directory).resolve()
+    base = json.loads((directory / "manifest.json").read_text())
+    selections = canonical_log_records(base)
+    reader = read_log_fn or _read_log
+    rows, logs, excluded = [], [], []
+    for selection in selections:
+        path = selection["path"]
+        actual_hash = verify_record_hash(selection)
+        log = reader(Path(path))
+        if not record_accepts_log(selection, log.status):
+            raise ValueError(
+                "A failed canonical log requires an audited retained-recovery selection."
+            )
+        if str(log.eval.model) != base["config"]["model"]:
+            raise ValueError("Canonical source model differs from the campaign model.")
+        expected, found = set(selection["expected_sample_ids"]), set()
+        loaded = rows_from_log(log, path)
+        for row in loaded:
+            sample_id = str(row["sample_id"])
+            if sample_id not in expected:
+                if not selection["recovery_retained"]:
+                    raise ValueError("Unexpected sample in an ordinary canonical source log.")
+                excluded.append(
+                    {
+                        "source": path,
+                        "sample_id": row["sample_id"],
+                        "epoch": row["epoch"],
+                        "cell_index": selection["cell_index"],
+                        "batch_id": selection["batch_id"],
+                        "reason": "superseded_recovery_attempt",
+                        "log_status": log.status,
+                        "error": row["error"],
+                        "invalidated": row["invalidated"],
+                        "truncated": row["truncated"],
+                        "schema_valid": row["metrics"].get("schema_valid"),
+                    }
+                )
+                continue
+            if sample_id in found or row["epoch"] != 1:
+                raise ValueError("Duplicate sample or unexpected epoch in canonical source log.")
+            if any(row.get(key) != value for key, value in selection["cell"].items() if key != "n"):
+                raise ValueError("Canonical sample metadata differs from its original cell.")
+            if selection["recovery_retained"] and row["error"]:
+                raise ValueError(
+                    "A retained recovery selection must not include an errored sample."
+                )
+            found.add(sample_id)
+            row.update(
+                canonical_cell_index=selection["cell_index"],
+                canonical_batch_id=selection["batch_id"],
+                canonical_recovery_retained=selection["recovery_retained"],
+                canonical_log_sha256=actual_hash,
+            )
+            rows.append(row)
+        if found != expected:
+            raise ValueError("Canonical selection includes samples missing from its source log.")
+        logs.append(
+            {
+                "path": path,
+                "status": log.status,
+                "samples": len(loaded),
+                "canonical_samples": len(found),
+                "excluded_attempt_samples": len(loaded) - len(found),
+                "error": bool(getattr(log, "error", None)),
+                "log_sha256": actual_hash,
+                "batch_id": selection["batch_id"],
+                "cell_index": selection["cell_index"],
+                "recovery_retained": selection["recovery_retained"],
+            }
+        )
+    planned = base.get("total_samples", sum(len(batch["sample_ids"]) for batch in base["batches"]))
+    audit = {
+        "directory": str(directory),
+        "manifest_status": base["status"],
+        "planned_samples": planned,
+        "canonical_samples": len(rows),
+        "not_yet_canonical_samples": planned - len(rows),
+        "source_revisions": base.get("source_revisions", []),
+        "recovery_attempts": [
+            {
+                "logical_batch_id": batch["batch_id"],
+                "cell_index": batch["cell_index"],
+                "recovery": batch["recovery"],
+            }
+            for batch in base["batches"]
+            if batch.get("recovery")
+        ],
+        "excluded_attempt_samples": excluded,
+        "excluded_attempt_counts": {
+            "rows": len(excluded),
+            "errors": sum(row["error"] for row in excluded),
+            "truncated": sum(row["truncated"] for row in excluded),
+            "invalidated": sum(row["invalidated"] for row in excluded),
+        },
+        "scope": "Canonical base outcomes only. Superseded attempts remain audit evidence and are excluded from statistical denominators; invalid answers and model limits in retained samples remain outcomes.",
+    }
+    return rows, logs, audit
+
+
 def _eligible(row):
     metrics = row.get("metrics", {})
     return (
@@ -688,21 +796,34 @@ def _plots(summary, out):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("logs", nargs="+")
+    parser.add_argument("logs", nargs="*")
+    parser.add_argument(
+        "--campaign-dir", type=Path, help="Use canonical base selections from a campaign manifest."
+    )
     parser.add_argument("--out", default="analysis")
     parser.add_argument("--draws", type=int, default=5000)
     parser.add_argument("--holm", action="store_true")
     parser.add_argument("--plots", action="store_true")
     args = parser.parse_args(argv)
-    paths = []
-    for raw in args.logs:
-        path = Path(raw)
-        paths.extend(sorted(path.rglob("*.eval")) if path.is_dir() else [path])
-    if not paths:
-        parser.error("No .eval logs found")
-    rows, logs = load_rows(paths)
+    campaign_audit = None
+    if args.campaign_dir:
+        if args.logs:
+            parser.error(
+                "Choose --campaign-dir or positional logs; combining them would duplicate outcomes"
+            )
+        rows, logs, campaign_audit = load_campaign_rows(args.campaign_dir)
+    else:
+        paths = []
+        for raw in args.logs:
+            path = Path(raw)
+            paths.extend(sorted(path.rglob("*.eval")) if path.is_dir() else [path])
+        if not paths:
+            parser.error("Provide .eval logs or --campaign-dir")
+        rows, logs = load_rows(paths)
     summary = summarize(rows, args.draws, args.holm)
     summary["logs"] = logs
+    if campaign_audit is not None:
+        summary["campaign"] = campaign_audit
     export(rows, summary, args.out, args.plots)
     print(json.dumps(dict(output=str(Path(args.out).resolve()), logs=len(logs), samples=len(rows))))
 
