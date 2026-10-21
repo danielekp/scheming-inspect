@@ -22,18 +22,18 @@ Inspect the run plan, then explicitly launch the small live check:
 
 ```sh
 uv run python -m scheming_inspect.run --profile smoke
-uv run python -m scheming_inspect.run --profile smoke --execute --budget-usd 5
+uv run python -m scheming_inspect.run --profile smoke --execute
 uv run inspect view --log-dir logs/smoke
 uv run python -m scheming_inspect.analyze logs/smoke --out results/smoke --plots
 ```
 
-The default target is `openrouter/deepseek/deepseek-v4-flash`, a **contemporary substitute**, not a model from the paper. The runner looks up current uncached prices, sets provider price ceilings, reserves a conservative upper bound including one request beyond each token limit, disables retries and prompt-cache writes, and refuses a plan above its budget. It runs samples serially. If no provider meets the price and parameter requirements, the request fails instead of falling back to a higher price. The budget covers this invocation only; other processes using the key are outside its accounting. The followup and rescoring commands below are separate paid runs.
+The default target is `openrouter/deepseek/deepseek-v4-flash`, a **contemporary substitute**, not a model from the paper. The runner calls Inspect directly, runs samples serially, and preserves the configured token and step limits. It has no spending cap, price lookup, or provider price ceiling. Client retries and prompt-cache writes are disabled. After the run, an optional observation reports cumulative OpenRouter API-key usage; it may include other runs and never gates execution. The followup and rescoring commands below are separate paid runs.
 
-The `smoke` profile has eight samples, including both branches of the two paired experiments. It tests execution, not the paper's scientific claims. `main` has 1,498 rollouts per model; `full` has 9,094 before followups. Print and review a larger plan before running it. The runner currently budgets OpenRouter; native provider use is available through Inspect's CLI.
+The `smoke` profile has eight samples, including both branches of the two paired experiments. It tests execution, not the paper's scientific claims. `main` has 1,498 rollouts per model; `full` has 9,094 before followups. Print and review a larger plan before running it. Other Inspect model providers can be selected with `--model` and their required credentials.
 
 ## The code to read
 
-For the authorized full matrix and its follow-up stages, use the resumable campaign described in [Full campaign](docs/FULL_RUN.md). It reconciles spending between batches and shares one $50 cap across stages. The simpler `run` module above keeps its original whole-run reservation policy.
+For the authorized full matrix and its follow-up stages, use the resumable campaign described in [Full campaign](docs/FULL_RUN.md). At the user's request, both runners now operate without spending caps or billing-verification gates. An optional counter reports cumulative usage for the OpenRouter API key, which can include other activity and is not the campaign's exact cost. Existing results remain recorded, and the historical `budget.json` stays read-only.
 
 | File | Responsibility |
 |---|---|
@@ -46,7 +46,7 @@ For the authorized full matrix and its follow-up stages, use the resumable campa
 | `scheming_inspect/judge.py` | Optional evidence-quoting semantic scorer; requires an explicit grader. |
 | `scheming_inspect/followups.py` | Independent fixed questions and blind multi-turn interrogation. |
 | `scheming_inspect/analyze.py` | Offline CSV/JSON summaries, paired statistics and plots. |
-| `scheming_inspect/run.py`, `costs.py` | Plan/budget execution and verify logged OpenRouter charges. |
+| `scheming_inspect/run.py`, `spending.py`, `costs.py` | Execute a reviewed plan, optionally report key-wide usage, and inspect logged OpenRouter charges. |
 
 There is one task factory, rather than six independent frameworks. For example:
 
@@ -57,7 +57,7 @@ XDG_DATA_HOME="$PWD/inspect-data" uv run --env-file .env inspect eval tasks.py@s
   --log-dir logs/oversight
 ```
 
-This direct Inspect command does **not** use the runner's dollar guard. Task paths are relative here because the installed Inspect/Python combination does not accept every absolute task-path pattern. Data and Docker paths are resolved relative to the package, so importing the task from another working directory still works.
+Task paths are relative here because the installed Inspect/Python combination does not accept every absolute task-path pattern. Data and Docker paths are resolved relative to the package, so importing the task from another working directory still works.
 
 ## What is measured
 

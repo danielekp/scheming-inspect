@@ -1,8 +1,8 @@
-"""Explicit recovery of a stopped campaign, preserving original attempts and cost bounds.
+"""Explicit recovery of a stopped campaign, preserving original attempts.
 
-This module never starts a model. Preparation archives the old manifest, closes
-the uncertain attempt at its full reserved ceiling, and records an exact retry
-allowlist. The ordinary campaign runner dispatches that allowlist on --resume.
+Preparation archives the old manifest and records an exact retry allowlist.
+The ordinary campaign runner dispatches that allowlist on --resume. Financial
+records are historical evidence only and are never read or changed here.
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ from pathlib import Path
 from inspect_ai.dataset import MemoryDataset
 
 from . import campaign as c
-from .budget import CampaignLedger
 
 # These repairs affect scoring, accounting, and analysis. Task/data/model
 # definitions are deliberately not eligible for a recovery-time revision.
@@ -26,6 +25,7 @@ REPAIR_FILES = {
     "scheming_inspect/recovery.py",
     "scheming_inspect/poststages.py",
     "scheming_inspect/analyze.py",
+    "scheming_inspect/spending.py",
 }
 
 
@@ -152,11 +152,11 @@ def prepare_recovery(
             for key in set(current_hashes) | set(manifest["source_hashes"])
             if current_hashes.get(key) != manifest["source_hashes"].get(key)
         }
-        if not changed or not changed <= REPAIR_FILES:
+        if not changed <= REPAIR_FILES:
             raise c.CampaignError("Recovery permits only recorded scorer/accounting repairs")
         config = manifest["config"]
-        if config["retries"] != 0 or config["epochs"] != 1 or config["cache_prompt"] is not False:
-            raise c.CampaignError("Original execution bounds do not support reserved-cost recovery")
+        if config["epochs"] != 1:
+            raise c.CampaignError("Recovery requires one recorded epoch per sample")
         blocked = [batch for batch in manifest["batches"] if batch["status"] == "blocked"]
         if manifest["status"] != "blocked" or len(blocked) != 1:
             raise c.CampaignError("Expected one stopped, blocked base batch")
@@ -164,19 +164,6 @@ def prepare_recovery(
         journal = c.read_json(directory / "base" / batch["batch_id"] / "batch.json")
         if journal["status"] != "blocked":
             raise c.CampaignError("The physical batch journal is not blocked")
-        ledger = CampaignLedger(
-            directory / "budget.json",
-            limit_usd=config["budget_usd"],
-            starting_spend_usd=config["starting_spend_usd"],
-            stage_limits={"base": config["stage_budget_usd"]},
-        )
-        record = c._ledger_batch(ledger, batch["batch_id"])
-        if not record or record["status"] not in {"blocked", "closed_reserved"}:
-            raise c.CampaignError("Original attempt has no blocked/retained cost reservation")
-        c._verify_settled_logs(record, journal["log_paths"])
-        for old in manifest["batches"]:
-            if old["status"] == "settled":
-                c._verify_settled_logs(c._ledger_batch(ledger, old["batch_id"]), old["log_paths"])
         spec = recovery_spec(
             manifest, batch, journal, read_log_fn=read_log_fn, task_factory=task_factory
         )
@@ -202,20 +189,6 @@ def prepare_recovery(
             }
             c.atomic_json(recovery_dir / "manifest-before.json", manifest)
             c.atomic_json(plan_path, plan)
-        if record["status"] == "blocked":
-            ledger.close_with_reservation(
-                batch["batch_id"],
-                journal["log_paths"],
-                reason=reason,
-                process_stopped=True,
-                evidence={
-                    "bounded_execution_confirmed": True,
-                    "process": process_evidence,
-                    "recovery_plan": str(plan_path),
-                    "config": config,
-                    "provider": journal["provider"],
-                },
-            )
         new_key = c.fingerprint(
             {"config": config, "cells": manifest["cells"], "source_hashes": current_hashes}
         )
@@ -250,10 +223,8 @@ def run_recovery_batch(
     directory: Path,
     manifest: dict,
     batch: dict,
-    ledger,
     *,
     resume: bool,
-    bound_fn,
     task_factory=c.scheming,
     eval_fn=None,
     read_log_fn=None,
@@ -263,22 +234,23 @@ def run_recovery_batch(
     retained, retry = spec["retained_sample_ids"], spec["retry_sample_ids"]
     if set(retained) & set(retry) or Counter(retained + retry) != Counter(batch["sample_ids"]):
         raise c.CampaignError("Recovery selection changed or duplicates original work")
-    original = c._ledger_batch(ledger, spec["original_batch_id"])
-    if not original or original["status"] != "closed_reserved":
-        raise c.CampaignError("The original uncertain cost reservation is not retained")
-    c._verify_settled_logs(original, [spec["original_log"]])
     if sha256(spec["original_log"]) != spec["original_log_sha256"]:
         raise c.CampaignError("Original recovery evidence changed")
+    original_journal = c.read_json(directory / "base" / spec["original_batch_id"] / "batch.json")
+    if c.fingerprint(original_journal) != spec["original_journal_sha256"]:
+        raise c.CampaignError("Original recovery journal changed")
+    plan = c.read_json(directory / "recoveries" / spec["attempt_id"] / "plan.json")
+    if plan.get("recovery") != spec or plan.get("old_fingerprint") != spec["original_fingerprint"]:
+        raise c.CampaignError("Recovery selection differs from its prepared plan")
     log_dir = directory / "recovery-attempts" / spec["attempt_id"]
     journal_path = log_dir / "batch.json"
     journal = c.read_json(journal_path) if journal_path.exists() else None
-    reserved = c._ledger_batch(ledger, spec["attempt_id"])
+    if batch.get("status") in c.COMPLETE_BATCH_STATES and (
+        not journal or journal.get("status") not in c.COMPLETE_BATCH_STATES
+    ):
+        raise c.CampaignError("Completed recovery has no matching terminal attempt journal")
     task = None
-    if reserved or (journal and journal["status"] != "planned"):
-        upper, provider = (journal or reserved)["upper_usd"], (journal or {})["provider"]
-    else:
-        bound = bound_fn(config["model"], len(retry), config["token_limit"], config["max_tokens"])
-        upper, provider = bound["conservative_max_usd"], bound["provider"]
+    if not journal or journal["status"] == "planned":
         limits = {name: config[name] for name in ("max_steps", "max_tokens", "token_limit")}
         task = task_factory(**manifest["cells"][batch["cell_index"]], **limits)
         dataset = task.dataset
@@ -295,14 +267,9 @@ def run_recovery_batch(
         task,
         batch_id=spec["attempt_id"],
         log_dir=log_dir,
-        ledger=ledger,
-        upper_usd=upper,
         stage="base",
         model=config["model"],
-        provider=provider,
-        fingerprint=(journal or (reserved or {}).get("metadata", {})).get(
-            "fingerprint", manifest["fingerprint"]
-        ),
+        fingerprint=(journal or {}).get("fingerprint", manifest["fingerprint"]),
         expected_sample_ids=retry,
         max_samples=config["max_samples"],
         resume=resume,

@@ -16,18 +16,18 @@ from inspect_ai.model import (
 )
 from inspect_ai.solver import TaskState
 
+from scheming_inspect import campaign
 from scheming_inspect import poststages as p
 from scheming_inspect.protocol import plan
 
 MODEL = "openrouter/deepseek/deepseek-v4-flash"
-RATES = {
-    "pricing": {"prompt": "0.000000091", "completion": "0.000000182"},
-    "context_length": 1048576,
-    "provider": {
-        "max_price": {"prompt": 0.091, "completion": 0.182, "request": 0},
-        "require_parameters": True,
-    },
-}
+
+
+@pytest.fixture(autouse=True)
+def cost_reporting(monkeypatch):
+    reports = []
+    monkeypatch.setattr(campaign, "report_cost", lambda root: reports.append(root), raising=False)
+    return reports
 
 
 def original(sample_id, cell, *, guilty=False, **changes):
@@ -72,7 +72,6 @@ def setup_base(tmp_path, cases=None):
         "source_hashes": {},
         "config": {"model": MODEL, "seed": 42},
         "cells": [cell],
-        "provider_policy": RATES,
         "completed_base_logs": [str(source_path)],
         "batches": [
             {
@@ -94,7 +93,6 @@ def prepared(tmp_path):
     groups, eligibility = p.make_groups(discovery, 42)
     spec = {
         "groups": groups,
-        "rates": RATES,
         "config": {"max_tokens": 8000},
         "discovery": discovery,
         "eligibility": eligibility,
@@ -102,20 +100,10 @@ def prepared(tmp_path):
     return {"spec": spec, "progress": {}, "status": "planned"}, read
 
 
-class Ledger:
-    def __init__(self, remaining=50):
-        self.remaining = remaining
-        self.batches = {}
-
-    def snapshot(self):
-        return {"remaining_usd": self.remaining, "batches": self.batches, "stages": {}}
-
-
-def run(tmp_path, read, ledger=None, execute=None, **kwargs):
+def run(tmp_path, read, execute=None, **kwargs):
     return p.execute_poststages(
         tmp_path,
         model=MODEL,
-        ledger=ledger or Ledger(),
         read_log_fn=read,
         execute_batch_fn=execute,
         current_source_hash_fn=dict,
@@ -215,7 +203,7 @@ async def test_semantic_task_restores_answer_without_generating_or_copying_event
     manifest, read = prepared(tmp_path)
     groups = {group["id"]: group for group in manifest["spec"]["groups"]}
     reader = p.SourceReader(manifest["spec"]["discovery"]["sources"], read)
-    selection = p.next_selections(manifest, 50, 32)
+    selection = p.next_selections(manifest, 32)
     task = p.build_batch(selection, groups, reader, max_tokens=8000, token_limit=100000, seed=42)
     sample = list(task.dataset)[0]
     state = TaskState(
@@ -237,38 +225,27 @@ async def test_semantic_task_restores_answer_without_generating_or_copying_event
     assert reader.sample(sample.metadata["source_key"]).messages[0].text == "Finish the task."
 
 
-def test_budget_bound_counts_all_model_roles():
-    call = 1048576 * 0.000000091 + 8000 * 0.000000182
-    assert p.upper_bound("audit_main", 1, RATES, 8000) == pytest.approx(call)
-    assert p.upper_bound("fixed", 32, RATES, 8000) == pytest.approx(64 * call)
-    assert p.upper_bound("interrogation", 2, RATES, 8000) == pytest.approx(56 * call)
-    assert p.logical_generations("interrogation", 2) == {
-        "target": 14,
-        "grader": 14,
-        "interrogator": 28,
-    }
-
-
-def test_budget_adapts_all_stages_without_splitting_interrogation_pairs(tmp_path):
+def test_selection_preserves_stage_order_and_interrogation_pairs(tmp_path):
     manifest, _ = prepared(tmp_path)
-    selected = p.next_selections(manifest, 0.1, 32)
-    assert sum(item["stop"] - item["start"] for item in selected) == 1
+    selected = p.next_selections(manifest, 32)
+    assert sum(item["stop"] - item["start"] for item in selected) == 2
     for group in manifest["spec"]["groups"]:
         if group["stage"] == "audit_main":
             manifest["progress"][group["id"]] = group["samples"]
-    assert not p.next_selections(manifest, 5, 32)
-    selected = p.next_selections(manifest, 6, 32)
+    selected = p.next_selections(manifest, 3)
     assert sum(item["stop"] - item["start"] for item in selected) == 2
+    assert len(selected) == 1
     for group in manifest["spec"]["groups"]:
         if group["stage"] == "interrogation":
             manifest["progress"][group["id"]] = 2
-    selected = p.next_selections(manifest, 5, 32)
-    assert 0 < sum(item["stop"] - item["start"] for item in selected) < 32
+    selected = p.next_selections(manifest, 32)
+    assert sum(item["stop"] - item["start"] for item in selected) == 32
+    assert selected[0]["start"] == 0 and selected[0]["stop"] == 32
 
 
-@pytest.mark.parametrize("completed_status", ["settled", "complete_reserved"])
+@pytest.mark.parametrize("completed_status", ["complete", "settled", "complete_reserved"])
 def test_full_offline_execution_has_no_limit_one_and_resumes_without_dispatch(
-    tmp_path, completed_status
+    tmp_path, completed_status, cost_reporting
 ):
     _, _, read = setup_base(tmp_path)
     calls = []
@@ -279,7 +256,8 @@ def test_full_offline_execution_has_no_limit_one_and_resumes_without_dispatch(
         ids = [str(sample.id) for sample in task.dataset]
         assert ids == kwargs["expected_sample_ids"]
         assert len(ids) <= 32
-        assert kwargs["provider"] == RATES["provider"]
+        assert kwargs["provider"] == {}
+        assert "upper_usd" not in kwargs and "ledger" not in kwargs
         assert all(value == MODEL for value in kwargs["model_roles"].values())
         calls.append((kwargs["stage"], ids))
         return {
@@ -293,36 +271,37 @@ def test_full_offline_execution_has_no_limit_one_and_resumes_without_dispatch(
     assert result["stages"]["fixed"]["settled"] == 160
     assert [stage for stage, _ in calls] == ["audit_main", "interrogation"] + ["fixed"] * 5
     assert len({sample_id for _, ids in calls for sample_id in ids}) == 164
+    assert len(cost_reporting) == len(calls)
+    frozen = json.loads((tmp_path / "poststages.json").read_text())
+    assert "rates" not in frozen["spec"]
+    assert all("upper_usd" not in batch for batch in frozen["batches"])
     before = len(calls)
     again = run(tmp_path, read, execute=execute, resume=True)
     assert again == result and len(calls) == before
 
 
-def test_budget_halt_keeps_every_unfinished_group_and_exact_counts(tmp_path):
+def test_cost_report_failure_never_stops_or_skips_work(tmp_path, monkeypatch):
     _, _, read = setup_base(tmp_path)
-    result = run(
-        tmp_path,
-        read,
-        ledger=Ledger(0.05),
-        execute=lambda *a, **k: pytest.fail("unaffordable dispatch"),
-    )
-    assert result["status"] == "pending_budget"
-    assert result["stages"]["fixed"] == {"planned": 160, "settled": 0, "pending": 160}
-    manifest = json.loads((tmp_path / "poststages.json").read_text())
-    assert manifest["batches"] == []
-    assert len(manifest["spec"]["groups"]) == 4
+
+    def failed_report(root):
+        raise OSError("optional counter unavailable")
+
+    monkeypatch.setattr(campaign, "report_cost", failed_report, raising=False)
+    result = run(tmp_path, read, execute=lambda *a, **k: {"status": "complete"})
+    assert result["status"] == "complete"
+    assert result["stages"]["fixed"] == {"planned": 160, "settled": 160, "pending": 0}
 
 
-def test_existing_reserved_batch_reconciles_without_reconstructing_target(tmp_path):
+def test_started_batch_reconciles_without_reconstructing_target(tmp_path):
     _, _, read = setup_base(tmp_path)
-    ledger = Ledger()
 
     def interrupted(task, **kwargs):
-        ledger.batches[kwargs["batch_id"]] = {"status": "reserved"}
+        kwargs["log_dir"].mkdir(parents=True)
+        (kwargs["log_dir"] / "batch.json").write_text(json.dumps({"status": "started"}))
         raise RuntimeError("interrupted")
 
     with pytest.raises(RuntimeError):
-        run(tmp_path, read, ledger, interrupted)
+        run(tmp_path, read, interrupted)
     calls = []
 
     def reconcile(task, **kwargs):
@@ -330,19 +309,19 @@ def test_existing_reserved_batch_reconciles_without_reconstructing_target(tmp_pa
         assert task is None
         return {"status": "blocked"}
 
-    result = run(tmp_path, read, ledger, reconcile, resume=True)
+    result = run(tmp_path, read, reconcile, resume=True)
     assert result["status"] == "blocked" and calls == [None]
     assert result["stages"]["audit_main"]["settled"] == 0
 
 
 def test_resume_rejects_mutated_source_and_config(tmp_path):
     _, _, read = setup_base(tmp_path)
-    run(tmp_path, read, ledger=Ledger(0.01), execute=lambda *a, **k: None)
+    run(tmp_path, read, execute=lambda *a, **k: {"status": "blocked"})
     with pytest.raises(ValueError, match="configuration"):
-        run(tmp_path, read, ledger=Ledger(0.01), resume=True, max_tokens=4000)
+        run(tmp_path, read, resume=True, max_tokens=4000)
     (tmp_path / "source.eval").write_text("modified")
     with pytest.raises(ValueError, match="source log changed"):
-        run(tmp_path, read, ledger=Ledger(0.01), resume=True)
+        run(tmp_path, read, resume=True)
 
 
 def test_incomplete_source_is_not_disguised_as_full_success(tmp_path):

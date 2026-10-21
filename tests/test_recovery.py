@@ -1,4 +1,4 @@
-"""Offline recovery of real Inspect logs with permanent retained-cost accounting."""
+"""Offline recovery preserves original attempts without financial gates."""
 
 import copy
 from pathlib import Path
@@ -9,13 +9,8 @@ from inspect_ai.event import ModelEvent
 from inspect_ai.log import EvalConfig, EvalDataset, EvalLog, EvalSample, EvalSpec, write_eval_log
 from inspect_ai.model import GenerateConfig, ModelOutput
 
-from scheming_inspect import budget, campaign, recovery
-from scheming_inspect.budget import BudgetExceeded, CampaignLedger
+from scheming_inspect import campaign, recovery
 
-PROVIDER = {
-    "max_price": {"prompt": 0.1, "completion": 0.2, "request": 0},
-    "require_parameters": True,
-}
 OLD_HASHES = {"scheming_inspect/engine.py": "old", "scheming_inspect/data.py": "unchanged"}
 NEW_HASHES = {**OLD_HASHES, "scheming_inspect/engine.py": "repaired"}
 EVIDENCE = {"process_stopped": True, "worker": "offline-fixture"}
@@ -79,21 +74,8 @@ def write_log(task, kwargs, *, original=False):
 
 @pytest.fixture
 def stopped(tmp_path, monkeypatch):
-    requests = []
-    client = httpx.Client
-
-    def handler(request):
-        requests.append(request)
-        return httpx.Response(
-            200, json={"data": {"id": request.url.params["id"], "total_cost": 0.01}}
-        )
-
-    monkeypatch.setattr(
-        budget.httpx,
-        "Client",
-        lambda **kwargs: client(transport=httpx.MockTransport(handler), **kwargs),
-    )
-    monkeypatch.setenv("OPENROUTER_API_KEY", "offline-only")
+    monkeypatch.setattr(httpx, "Client", lambda **_kwargs: pytest.fail("Unexpected HTTP client"))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     cfg = dict(
         model=campaign.MODEL,
         max_steps=20,
@@ -101,9 +83,6 @@ def stopped(tmp_path, monkeypatch):
         token_limit=100000,
         max_samples=8,
         batch_size=32,
-        budget_usd=5,
-        stage_budget_usd=5,
-        starting_spend_usd=0,
         retries=0,
         epochs=1,
         cache_prompt=False,
@@ -113,20 +92,16 @@ def stopped(tmp_path, monkeypatch):
         tmp_path, config=cfg, cells=[cell], hashes=OLD_HASHES, resume=False
     )
     task = campaign.scheming(**cell)
-    # One stopped four-sample batch is the small analogue of 13 retained / 19 retry.
     batch = manifest["batches"][0]
     batch.update(start=0, stop=4, sample_ids=[str(s.id) for s in task.dataset])
     manifest["batches"] = [batch]
-    ledger = CampaignLedger(tmp_path / "budget.json", limit_usd=5, stage_limits={"base": 5})
+    (tmp_path / "budget.json").write_bytes(b"Historical budget: deliberately not parseable JSON.")
     result = campaign.execute_batch(
         task,
         batch_id=batch["batch_id"],
         log_dir=tmp_path / "base" / batch["batch_id"],
-        ledger=ledger,
-        upper_usd=2,
         stage="base",
         model=campaign.MODEL,
-        provider=PROVIDER,
         fingerprint=manifest["fingerprint"],
         eval_fn=lambda task, **kwargs: write_log(task, kwargs, original=True),
     )
@@ -134,30 +109,25 @@ def stopped(tmp_path, monkeypatch):
     batch.update(status="blocked", log_paths=result["log_paths"])
     manifest.update(status="blocked", blocker=result)
     campaign.atomic_json(tmp_path / "manifest.json", manifest)
-    return tmp_path, manifest, ledger, requests
+    return tmp_path, manifest
 
 
-def prepare(directory):
+def prepare(directory, hashes=NEW_HASHES):
     return recovery.prepare_recovery(
-        directory,
-        reason="Fix missing-key aggregation",
-        process_evidence=EVIDENCE,
-        hashes=NEW_HASHES,
+        directory, reason="Recover infrastructure failure", process_evidence=EVIDENCE, hashes=hashes
     )
 
 
-def bound(_model, n, _token_limit, _max_tokens):
-    assert n == 2
-    return {"conservative_max_usd": 1, "provider": PROVIDER}
-
-
-def test_prepare_run_resume_preserves_outcomes_exact_ids_and_full_old_reservation(stopped):
-    directory, old, ledger, requests = stopped
+@pytest.mark.parametrize("finished_status", ["complete", "settled", "complete_reserved"])
+def test_prepare_run_resume_preserves_outcomes_exact_ids_and_legacy_budget(
+    stopped, finished_status
+):
+    directory, old = stopped
     original_log = Path(old["batches"][0]["log_paths"][0])
     original_bytes = original_log.read_bytes()
+    budget_bytes = (directory / "budget.json").read_bytes()
     manifest = prepare(directory)
-    assert prepare(directory) == manifest  # idempotent, no second closure or billing
-    assert len(requests) == 3
+    assert prepare(directory) == manifest
     batch = manifest["batches"][0]
     spec = batch["recovery"]
     assert spec["retained_sample_ids"] == ["oversight-0001", "oversight-0003"]
@@ -169,106 +139,160 @@ def test_prepare_run_resume_preserves_outcomes_exact_ids_and_full_old_reservatio
     ]
     assert manifest["fingerprint"] != old["fingerprint"]
     assert manifest["source_revisions"][0]["old_source_hashes"] == OLD_HASHES
-    assert ledger.snapshot()["committed_usd"] == 2
-    assert not ledger.pending()
-    assert campaign._ledger_batch(ledger, batch["batch_id"])["status"] == "closed_reserved"
+    assert (
+        campaign.read_json(directory / "recoveries" / spec["attempt_id"] / "manifest-before.json")
+        == old
+    )
     attempts = []
 
     def evaluator(task, **kwargs):
         attempts.append([str(sample.id) for sample in task.dataset])
-        assert ledger.snapshot()["committed_usd"] == 3  # old ceiling + new reservation
+        assert kwargs["model_args"] == {"provider": {}}
+        assert "spending_reservation_usd" not in kwargs["metadata"]
         return write_log(task, kwargs)
 
-    result = recovery.run_recovery_batch(
-        directory, manifest, batch, ledger, resume=True, bound_fn=bound, eval_fn=evaluator
-    )
+    result = recovery.run_recovery_batch(directory, manifest, batch, resume=True, eval_fn=evaluator)
     assert attempts == [["oversight-0002", "oversight-0004"]]
+    assert result["status"] == "complete"
     assert result["sample_status_counts"] == {"invalid_schema": 1, "limited": 1, "success": 2}
     assert [r["expected_sample_ids"] for r in result["canonical_log_records"]] == [
         ["oversight-0001", "oversight-0003"],
         ["oversight-0002", "oversight-0004"],
     ]
-    assert ledger.snapshot()["committed_usd"] == pytest.approx(2.02)
-    assert original_log.read_bytes() == original_bytes
-    assert len(requests) == 5
+    # Compatibility with completed pre-migration recovery journals.
+    journal_path = directory / "recovery-attempts" / spec["attempt_id"] / "batch.json"
+    journal = campaign.read_json(journal_path)
+    journal["status"] = finished_status
+    if finished_status != "complete":
+        journal["settlement"] = {"log_fingerprints": journal["log_fingerprints"]}
+    campaign.atomic_json(journal_path, journal)
     finished = campaign.run_base(
         directory,
         manifest,
-        ledger,
         resume=True,
-        bound_fn=lambda *_: pytest.fail("Recomputed a settled retry"),
-        eval_fn=lambda *_a, **_k: pytest.fail("Dispatched a settled retry"),
+        eval_fn=lambda *_a, **_k: pytest.fail("Redispatched an existing recovery"),
         source_hash_fn=lambda: NEW_HASHES,
     )
     assert finished["status"] == "base_complete"
-    assert len(requests) == 5
-    assert campaign.campaign_status(directory)["base_samples_settled"] == 4
     ids = [
         sid
         for record in finished["completed_base_log_records"]
         for sid in record["expected_sample_ids"]
     ]
     assert sorted(ids) == sorted(batch["sample_ids"]) and len(set(ids)) == 4
-    with pytest.raises(BudgetExceeded):
-        ledger.reserve("would_exceed_global_cap", 2.99, stage="base")
+    assert original_log.read_bytes() == original_bytes
+    assert (directory / "budget.json").read_bytes() == budget_bytes
 
 
-def test_data_hash_migration_rejected_before_ledger_or_manifest_changes(stopped):
-    directory, _, ledger, _ = stopped
+def test_data_hash_migration_rejected_before_manifest_or_historical_records_change(stopped):
+    directory, _ = stopped
     before = (directory / "manifest.json").read_bytes()
-    ledger_before = ledger.path.read_bytes()
+    budget_before = (directory / "budget.json").read_bytes()
     with pytest.raises(campaign.CampaignError, match="repairs"):
-        recovery.prepare_recovery(
-            directory,
-            reason="not a scorer-only repair",
-            process_evidence=EVIDENCE,
-            hashes={**NEW_HASHES, "scheming_inspect/data.py": "changed input facts"},
-        )
+        prepare(directory, {**NEW_HASHES, "scheming_inspect/data.py": "changed input facts"})
     assert (directory / "manifest.json").read_bytes() == before
-    assert ledger.path.read_bytes() == ledger_before
+    assert (directory / "budget.json").read_bytes() == budget_before
     assert not (directory / "recoveries").exists()
 
 
-def test_restart_after_ledger_closure_finishes_without_second_closure(stopped, monkeypatch):
-    directory, old, ledger, _ = stopped
+def test_restart_after_preparation_snapshot_finishes_without_replacing_evidence(
+    stopped, monkeypatch
+):
+    directory, _ = stopped
     original_atomic = campaign.atomic_json
 
     def interrupted_write(path, value):
         if Path(path) == directory / "manifest.json" and value.get("status") == "recovery_ready":
-            raise OSError("simulated interruption after ledger closure")
+            raise OSError("simulated interruption after preparation")
         original_atomic(path, value)
 
     monkeypatch.setattr(campaign, "atomic_json", interrupted_write)
     with pytest.raises(OSError, match="simulated interruption"):
         prepare(directory)
-    assert (
-        campaign._ledger_batch(ledger, old["batches"][0]["batch_id"])["status"] == "closed_reserved"
-    )
+    snapshot = next((directory / "recoveries").glob("*/manifest-before.json"))
+    original_bytes = snapshot.read_bytes()
     monkeypatch.setattr(campaign, "atomic_json", original_atomic)
-    monkeypatch.setattr(
-        CampaignLedger,
-        "close_with_reservation",
-        lambda *_a, **_k: pytest.fail("Closed an attempt twice"),
-    )
     recovered = prepare(directory)
     assert recovered["status"] == "recovery_ready"
     assert len(recovered["source_revisions"]) == 1
-    assert ledger.snapshot()["committed_usd"] == 2
+    assert snapshot.read_bytes() == original_bytes
 
 
-def test_retry_reservation_must_fit_alongside_original_retained_cost(stopped):
-    directory, _, ledger, requests = stopped
+@pytest.mark.parametrize(
+    "changed", ["original_log", "original_journal", "prepared_plan", "partition"]
+)
+def test_changed_recovery_evidence_cannot_dispatch(stopped, changed):
+    directory, _ = stopped
     manifest = prepare(directory)
-    result = recovery.run_recovery_batch(
-        directory,
-        manifest,
-        manifest["batches"][0],
-        ledger,
-        resume=True,
-        bound_fn=lambda *_: {"conservative_max_usd": 3.01, "provider": PROVIDER},
-        eval_fn=lambda *_a, **_k: pytest.fail("Exceeded combined budget"),
-    )
-    assert result["status"] == "pending_budget"
-    assert ledger.snapshot()["committed_usd"] == 2
-    assert not ledger.pending()
-    assert len(requests) == 3
+    batch = manifest["batches"][0]
+    spec = batch["recovery"]
+    if changed == "original_log":
+        with Path(spec["original_log"]).open("ab") as stream:
+            stream.write(b"changed")
+    elif changed == "original_journal":
+        path = directory / "base" / batch["batch_id"] / "batch.json"
+        value = campaign.read_json(path)
+        value["changed"] = True
+        campaign.atomic_json(path, value)
+    elif changed == "prepared_plan":
+        path = directory / "recoveries" / spec["attempt_id"] / "plan.json"
+        value = campaign.read_json(path)
+        value["recovery"]["retry_sample_ids"].reverse()
+        campaign.atomic_json(path, value)
+    else:
+        spec["retry_sample_ids"].append(spec["retained_sample_ids"][0])
+    with pytest.raises(campaign.CampaignError):
+        recovery.run_recovery_batch(
+            directory,
+            manifest,
+            batch,
+            resume=True,
+            eval_fn=lambda *_a, **_k: pytest.fail("Dispatched changed recovery evidence"),
+        )
+
+
+def test_unchanged_source_can_recover_infrastructure_without_financial_configuration(stopped):
+    directory, _ = stopped
+    (directory / "budget.json").unlink()
+    manifest = prepare(directory, OLD_HASHES)
+    assert manifest["batches"][0]["recovery"]["retry_sample_ids"] == [
+        "oversight-0002",
+        "oversight-0004",
+    ]
+    assert prepare(directory, OLD_HASHES) == manifest
+    assert not (directory / "budget.json").exists()
+
+
+@pytest.mark.parametrize("evidence", [{}, {"process_stopped": "true"}, {"process_stopped": False}])
+def test_stopped_process_proof_still_required(stopped, evidence):
+    directory, _ = stopped
+    before = (directory / "manifest.json").read_bytes()
+    with pytest.raises(campaign.CampaignError, match="stopped-process"):
+        recovery.prepare_recovery(
+            directory, reason="retry", process_evidence=evidence, hashes=NEW_HASHES
+        )
+    assert (directory / "manifest.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("journal_status", [None, "planned", "started"])
+@pytest.mark.parametrize("batch_status", ["complete", "settled", "complete_reserved"])
+def test_completed_recovery_never_dispatches_without_terminal_attempt_journal(
+    stopped, journal_status, batch_status
+):
+    directory, _ = stopped
+    manifest = prepare(directory)
+    batch = manifest["batches"][0]
+    batch["status"] = batch_status
+    if journal_status:
+        campaign.atomic_json(
+            directory / "recovery-attempts" / batch["recovery"]["attempt_id"] / "batch.json",
+            {"status": journal_status},
+        )
+    with pytest.raises(campaign.CampaignError, match="terminal attempt journal"):
+        recovery.run_recovery_batch(
+            directory,
+            manifest,
+            batch,
+            resume=True,
+            eval_fn=lambda *_a, **_k: pytest.fail("Redispatched completed recovery"),
+        )

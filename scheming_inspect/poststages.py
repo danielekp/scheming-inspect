@@ -1,9 +1,9 @@
-"""Frozen, budgeted post-stages over canonical completed campaign logs.
+"""Frozen post-stages over canonical completed campaign logs.
 
 All eligible main sources are included: no default one-source limit. Descriptors
 are frozen before generation; histories are loaded one log at a time and copied
-only for the current batch. The shared campaign executor owns reservations,
-provider caps, exact billing, and the rule that started batches never rerun.
+only for the current batch. Completed and started batches never regenerate on
+resume. Cost reporting is informational and never controls execution.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import math
 import random
 from collections import Counter
 from collections.abc import Callable
@@ -172,7 +171,7 @@ def discover_sources(base: dict, model: str, read_log_fn: Callable = _read_log) 
     if base.get("status") != "base_complete" or any(
         b["status"] not in COMPLETE_BATCH_STATES for b in base["batches"]
     ):
-        raise ValueError("Post-stages require a completed, budget-accounted base campaign.")
+        raise ValueError("Post-stages require a completed base campaign.")
     records, excluded, recovery_excluded, hashes, seen = {}, [], [], {}, set()
     requested = Counter(
         {"audit_main": 0, "audit_remaining": 0, "fixed_sources": 0, "interrogation_sources": 0}
@@ -370,31 +369,6 @@ def group_sample_ids(group: dict) -> list[str]:
     ]
 
 
-def logical_generations(stage: str, samples: int) -> dict[str, int]:
-    if stage.startswith("audit_"):
-        return {"grader": samples}
-    if stage == "fixed":
-        return {"target": samples, "grader": samples}
-    if stage == "interrogation":
-        return {"target": 7 * samples, "grader": 7 * samples, "interrogator": 14 * samples}
-    raise ValueError(f"Unknown post-stage {stage}")
-
-
-def upper_bound(stage: str, samples: int, rates: dict, max_tokens: int) -> float:
-    """Every logical generation reserves a maximum-context prompt and completion."""
-    context = int(rates["context_length"])
-    prompt, completion = (float(rates["pricing"][name]) for name in ("prompt", "completion"))
-    if (
-        context < 1
-        or max_tokens < 1
-        or any(not math.isfinite(rate) or rate < 0 for rate in (prompt, completion))
-    ):
-        raise ValueError("Invalid post-stage provider pricing/context bound")
-    return sum(logical_generations(stage, samples).values()) * (
-        context * prompt + max_tokens * completion
-    )
-
-
 class SourceReader:
     """Cache at most one source log; never copy original events into new tasks."""
 
@@ -556,12 +530,12 @@ def progress_report(manifest: dict) -> dict:
             )
             for stage in STAGES
         },
-        "scope": "Reconstructed protocol; settled counts include explicit unscored judge outcomes, not guaranteed valid labels.",
+        "scope": "Reconstructed protocol; completed evaluation counts include explicit unscored judge outcomes, not guaranteed valid labels.",
     }
 
 
-def next_selections(manifest: dict, remaining_usd: float, batch_size: int) -> list[dict]:
-    """Adapt to budget before dispatch; an interrogation pair is indivisible."""
+def next_selections(manifest: dict, batch_size: int) -> list[dict]:
+    """Keep frozen stage/group order and never divide an interrogation pair."""
     spec, selected, count, stage = manifest["spec"], [], 0, None
     for group in spec["groups"]:
         start = manifest["progress"].get(group["id"], 0)
@@ -574,12 +548,6 @@ def next_selections(manifest: dict, remaining_usd: float, batch_size: int) -> li
         unit = 2 if stage == "interrogation" else 1
         available = min(group["samples"] - start, batch_size - count)
         take = available - available % unit
-        while (
-            take
-            and upper_bound(stage, count + take, spec["rates"], spec["config"]["max_tokens"])
-            > remaining_usd
-        ):
-            take -= unit
         if not take:
             break
         selected.append({"group_id": group["id"], "start": start, "stop": start + take})
@@ -593,7 +561,6 @@ def execute_poststages(
     campaign_root,
     *,
     model,
-    ledger,
     batch_size=32,
     max_samples=8,
     max_tokens=8000,
@@ -602,13 +569,12 @@ def execute_poststages(
     source_hashes=None,
     execute_batch_fn=None,
     read_log_fn=_read_log,
-    bound_fn=None,
     current_source_hash_fn=None,
 ) -> dict:
-    """Run all frozen post-stage groups, or return explicit blocked/pending status.
+    """Run every frozen group with no spending caps or billing gate.
 
-    The only model is the campaign's authorized model, reused in every role with
-    the same provider caps. Injectable functions support entirely offline tests.
+    The campaign's model is reused in every role. Source validation, durable
+    batch identities, and outcome reporting remain identical on resume.
     """
     from . import campaign
 
@@ -657,16 +623,10 @@ def execute_poststages(
     else:
         discovery = discover_sources(base, model, read_log_fn)
         groups, eligibility = make_groups(discovery, seed=config["seed"])
-        bound = base.get("provider_policy") or (bound_fn or campaign.openrouter_bound)(
-            model, 1, token_limit, max_tokens
-        )
-        rates = {key: bound[key] for key in ("pricing", "context_length", "provider")}
-        upper_bound("interrogation", 2, rates, max_tokens)  # Fail before freezing invalid pricing.
         spec = {
             "config": config,
             "base_fingerprint": base["fingerprint"],
             "source_hashes": hashes,
-            "rates": rates,
             "discovery": discovery,
             "groups": groups,
             "eligibility": eligibility,
@@ -689,7 +649,7 @@ def execute_poststages(
         manifest["spec"]["discovery"]["source_logs"],
     )
     if resume:
-        # Revalidate settled log fingerprints/ledger identity without generating.
+        # Revalidate completed batch identity and immutable logs without generating.
         for old in manifest["batches"]:
             if old["status"] not in COMPLETE_BATCH_STATES:
                 continue
@@ -700,11 +660,9 @@ def execute_poststages(
                 None,
                 batch_id=old["batch_id"],
                 log_dir=root / "poststages" / old["stage"] / old["batch_id"],
-                ledger=ledger,
-                upper_usd=old["upper_usd"],
                 stage=old["stage"],
                 model=model,
-                provider=manifest["spec"]["rates"]["provider"],
+                provider={},
                 fingerprint=manifest["fingerprint"],
                 expected_sample_ids=old["sample_ids"],
                 model_roles=roles,
@@ -724,23 +682,21 @@ def execute_poststages(
         if pending:
             batch = pending[0]
         else:
-            snapshot = ledger.snapshot()
-            selections = next_selections(manifest, snapshot["remaining_usd"], batch_size)
+            selections = next_selections(manifest, batch_size)
             if not selections:
                 remaining = any(
                     manifest["progress"].get(group["id"], 0) < group["samples"]
                     for group in groups.values()
                 )
-                manifest["status"] = (
-                    "pending_budget"
-                    if remaining
-                    else (
-                        "complete_with_exclusions"
-                        if manifest["spec"]["discovery"]["excluded"]
-                        else "complete"
+                if remaining:
+                    raise ValueError(
+                        "Frozen post-stage groups cannot form the next complete batch."
                     )
+                manifest["status"] = (
+                    "complete_with_exclusions"
+                    if manifest["spec"]["discovery"]["excluded"]
+                    else "complete"
                 )
-                manifest["budget"] = campaign.budget_summary(snapshot)
                 campaign.atomic_json(path, manifest)
                 return progress_report(manifest)
             stage = groups[selections[0]["group_id"]]["stage"]
@@ -758,7 +714,6 @@ def execute_poststages(
                 "selections": selections,
                 "sample_ids": ids,
                 "status": "planned",
-                "upper_usd": upper_bound(stage, len(ids), manifest["spec"]["rates"], max_tokens),
             }
             manifest["batches"].append(batch)
             manifest["status"] = "running"
@@ -767,16 +722,9 @@ def execute_poststages(
         log_dir = root / "poststages" / stage / batch["batch_id"]
         journal_path = log_dir / "batch.json"
         journal = json.loads(journal_path.read_text()) if journal_path.exists() else {}
-        reserved = ledger.snapshot().get("batches", {}).get(batch["batch_id"])
-        already_started = bool(reserved) or journal.get("status") in {
-            "reserved",
-            "started",
-            "returned",
-            "interrupted",
-            "blocked",
-            "settled",
-            "complete_reserved",
-        }
+        already_started = bool(journal and journal.get("status") != "planned") or bool(
+            list(log_dir.glob("*.eval"))
+        )
         task = (
             None
             if already_started
@@ -795,11 +743,9 @@ def execute_poststages(
                 task,
                 batch_id=batch["batch_id"],
                 log_dir=log_dir,
-                ledger=ledger,
-                upper_usd=batch["upper_usd"],
                 stage=stage,
                 model=model,
-                provider=manifest["spec"]["rates"]["provider"],
+                provider={},
                 fingerprint=manifest["fingerprint"],
                 expected_sample_ids=batch["sample_ids"],
                 model_roles=roles,
@@ -818,14 +764,16 @@ def execute_poststages(
         )
         if result["status"] not in COMPLETE_BATCH_STATES:
             manifest.update(status=result["status"], blocked_batch=batch["batch_id"])
-            campaign.atomic_json(path, manifest)
-            return progress_report(manifest)
-        for selection in batch["selections"]:
-            manifest["progress"][selection["group_id"]] = selection["stop"]
-        manifest.pop("blocked_batch", None)
+        else:
+            for selection in batch["selections"]:
+                manifest["progress"][selection["group_id"]] = selection["stop"]
+            manifest.pop("blocked_batch", None)
         campaign.atomic_json(path, manifest)
-        campaign.emit(
-            "poststage_progress",
-            **progress_report(manifest),
-            budget=campaign.budget_summary(ledger.snapshot()),
-        )
+        try:
+            spending = campaign.report_cost(root)
+        except Exception as exc:
+            spending = {"status": "unavailable"}
+            campaign.emit("cost_report_unavailable", error_type=type(exc).__name__)
+        campaign.emit("poststage_progress", **progress_report(manifest), spending=spending)
+        if result["status"] not in COMPLETE_BATCH_STATES:
+            return progress_report(manifest)

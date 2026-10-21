@@ -1,7 +1,7 @@
-"""Resumable, budget-reserved batches for the complete reconstruction.
+"""Run the reconstruction in resumable batches, without spending limits.
 
-Nothing runs without --execute. A durable reservation or started batch is never
-automatically rerun: --resume only reconciles it from existing terminal logs.
+Billing is optional reporting only. Completed or interrupted batches are never
+automatically regenerated; resumes inspect their saved results first.
 """
 
 from __future__ import annotations
@@ -11,13 +11,11 @@ import contextlib
 import fcntl
 import hashlib
 import json
-import math
 import os
 import platform
 import sys
 from collections import Counter
 from datetime import datetime, timezone
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -29,17 +27,12 @@ from inspect_ai.log import read_eval_log
 from inspect_ai.model import GenerateConfig, get_model
 
 from .protocol import PROFILES, plan
-from .run import openrouter_bound
+from .spending import report_cost
 from .tasks import ROOT, scheming
 
 MODEL = "openrouter/deepseek/deepseek-v4-flash"
 MANIFEST_VERSION = 1
-COMPLETE_BATCH_STATES = {"settled", "complete_reserved"}
-
-
-def ledger_status(batch_status: str) -> str:
-    """Execution can finish while its full unknown bill remains reserved."""
-    return "closed_reserved" if batch_status == "complete_reserved" else batch_status
+COMPLETE_BATCH_STATES = {"complete", "settled", "complete_reserved"}
 
 
 class CampaignError(RuntimeError):
@@ -122,13 +115,6 @@ def emit(event: str, **values: Any) -> None:
     print(json.dumps({"time": utc_now(), "event": event, **values}, allow_nan=False), flush=True)
 
 
-def _ledger_batch(ledger, batch_id: str) -> dict | None:
-    batches = ledger.snapshot().get("batches", {})
-    if isinstance(batches, dict):
-        return batches.get(batch_id)
-    return next((batch for batch in batches if batch.get("batch_id") == batch_id), None)
-
-
 def _read_log(path: Path):
     # Binary streams avoid filesystem-provider discovery on local .eval files.
     with path.open("rb") as stream:
@@ -144,7 +130,7 @@ def inspect_batch_logs(
     batch_fingerprint: str,
     read_log_fn=None,
 ) -> dict:
-    """Check complete coverage before allowing a reservation to be released."""
+    """Validate terminal log identity and exact coverage, retaining all outcomes."""
     reader = read_log_fn or _read_log
     paths = sorted(log_dir.glob("*.eval"))
     errors, outcomes, seen = [], [], Counter()
@@ -214,12 +200,12 @@ def _role_models(roles: dict[str, str] | None, model: str, provider: dict) -> di
 
 def _verify_settled_logs(record: dict, paths: list[str]) -> None:
     recorded = record.get("log_fingerprints", {})
-    if set(recorded) != set(paths):
-        raise CampaignError("Settled ledger log inventory differs from the batch journal")
+    if not paths or set(recorded) != set(paths):
+        raise CampaignError("Saved log inventory differs from the batch journal")
     for raw in paths:
         path = Path(raw)
         if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != recorded[raw]:
-            raise CampaignError("A settled batch log was removed or changed")
+            raise CampaignError("A completed batch log was removed or changed")
 
 
 def execute_batch(
@@ -227,32 +213,20 @@ def execute_batch(
     *,
     batch_id: str,
     log_dir: str | Path,
-    ledger,
-    upper_usd: float,
     stage: str,
     model: str,
-    provider: dict,
     fingerprint: str,
     expected_sample_ids: list[str] | None = None,
     model_roles: dict[str, str] | None = None,
     max_samples: int = 8,
     resume: bool = False,
+    provider: dict | None = None,
     eval_fn=None,
     read_log_fn=None,
 ) -> dict:
-    """Execute once, then reconcile; reusable by the optional post stages.
-
-    Returns ``settled``, ``complete_reserved``, ``blocked``, or ``pending_budget``.
-    Complete-reserved work retains its full spending ceiling, not an actual bill.
-    The last status means
-    no reservation/start occurred, so a caller may safely choose a smaller batch.
-    Existing started/reserved batches are reconciliation-only, even on resume.
-    Roles are role-to-model strings; each gets the same provider price caps.
-    """
-    from .budget import BudgetError, BudgetExceeded
-
-    if not math.isfinite(upper_usd) or upper_usd < 0 or max_samples < 1:
-        raise CampaignError("Invalid batch budget or concurrency")
+    """Run once and save results. No price queries, reservations, or billing gates."""
+    if max_samples < 1:
+        raise CampaignError("Concurrency must be positive")
     log_dir = Path(log_dir).resolve()
     ids = (
         [str(sample.id) for sample in task.dataset]
@@ -264,33 +238,28 @@ def execute_batch(
     if task is not None and [str(sample.id) for sample in task.dataset] != ids:
         raise CampaignError("Task slice does not match the frozen sample IDs")
     roles = dict(model_roles or {})
-    if any(not isinstance(name, str) or name != model for name in roles.values()):
-        raise CampaignError("All campaign roles must use the same authorized model")
-    identity = {
-        "batch_id": batch_id,
-        "stage": stage,
-        "model": model,
-        "fingerprint": fingerprint,
-        "sample_ids": ids,
-        "model_roles": roles,
-        "max_samples": max_samples,
-    }
+    if any(name != model for name in roles.values()):
+        raise CampaignError("All campaign roles must use the same model")
+    identity = dict(
+        batch_id=batch_id,
+        stage=stage,
+        model=model,
+        fingerprint=fingerprint,
+        sample_ids=ids,
+        model_roles=roles,
+        max_samples=max_samples,
+    )
     journal_path = log_dir / "batch.json"
     with exclusive_lock(log_dir / ".batch.lock"):
         previous = read_json(journal_path) if journal_path.exists() else None
-        reserved = _ledger_batch(ledger, batch_id)
         if previous and any(previous.get(key) != value for key, value in identity.items()):
             raise CampaignError("Existing batch identity/configuration does not match")
-        if reserved and any(
-            reserved.get("metadata", {}).get(key) != value for key, value in identity.items()
-        ):
-            raise CampaignError("Ledger reservation identity differs from the batch")
-        if (previous or reserved) and not resume:
-            raise CampaignError("Batch already exists; use --resume to reconcile, never rerun")
+        if previous and not resume:
+            raise CampaignError("Batch already exists; use --resume, never rerun")
         if previous and previous["status"] in COMPLETE_BATCH_STATES:
-            if not reserved or reserved.get("status") != ledger_status(previous["status"]):
-                raise CampaignError("Settled journal and budget ledger disagree")
-            _verify_settled_logs(reserved, previous.get("log_paths", []))
+            # Legacy financial records are used only as immutable log hashes.
+            record = previous.get("settlement") or previous
+            _verify_settled_logs(record, previous.get("log_paths", []))
             return previous
         journal = previous or {
             **identity,
@@ -298,70 +267,23 @@ def execute_batch(
             "created_at": utc_now(),
             "status": "planned",
             "log_dir": str(log_dir),
-            "upper_usd": upper_usd,
-            "provider": provider,
         }
-        # A durable ledger reservation is enough to forbid redispatch, even if
-        # the process died before its journal could be marked started.
-        reconcile_only = reserved is not None or journal["status"] in {
-            "reserved",
-            "started",
-            "returned",
-            "interrupted",
-            "blocked",
-        }
-        if not reconcile_only:
+        if journal["status"] == "planned":
             if task is None:
                 raise CampaignError("An unstarted batch needs its original task")
             if list(log_dir.glob("*.eval")):
                 raise CampaignError("Unstarted batch directory already contains eval logs")
-            # Save planned identity first. An unsuccessful budget check cannot
-            # leave an ambiguous started record or charge a model call.
-            atomic_json(journal_path, journal)
-            try:
-                ledger.reserve(
-                    batch_id, upper_usd, stage=stage, metadata={**identity, "log_dir": str(log_dir)}
-                )
-            except BudgetExceeded as exc:
-                if _ledger_batch(ledger, batch_id) is not None:
-                    raise CampaignError(
-                        "Reservation outcome uncertain; resume reconciliation"
-                    ) from exc
-                journal.update(status="planned", budget_blocker=str(exc), updated_at=utc_now())
-                # No reservation and no dispatch occurred. Keep an audit note,
-                # but no batch identity lockout: post stages may safely shrink
-                # this not-yet-started batch to fit the remaining reservation.
-                atomic_json(log_dir / "budget-denial.json", journal)
-                journal_path.unlink(missing_ok=True)
-                return {**journal, "status": "pending_budget"}
-            except BudgetError as exc:
-                raise CampaignError(
-                    "Ledger refuses new work; reconcile its outstanding blocker"
-                ) from exc
-            journal.update(
-                status="reserved", upper_usd=upper_usd, provider=provider, reserved_at=utc_now()
-            )
-            atomic_json(journal_path, journal)
-            # The started record is durable before the first paid request.
+            # Durable before any request: an interrupted batch cannot be replayed silently.
             journal.update(status="started", started_at=utc_now())
             atomic_json(journal_path, journal)
-            emit(
-                "batch_started",
-                batch_id=batch_id,
-                stage=stage,
-                samples=len(ids),
-                upper_usd=upper_usd,
-            )
-            evaluator = eval_fn or inspect_eval
-            # DeepSeek's available capped providers do not advertise this
-            # optional parameter. Omit it; the solver executes tools serially.
+            emit("batch_started", batch_id=batch_id, stage=stage, samples=len(ids))
             task.config.parallel_tool_calls = None
             try:
-                evaluator(
+                (eval_fn or inspect_eval)(
                     task,
                     model=model,
-                    model_args={"provider": provider},
-                    model_roles=_role_models(roles, model, provider),
+                    model_args={"provider": {}},
+                    model_roles=_role_models(roles, model, {}),
                     log_dir=str(log_dir),
                     max_samples=max_samples,
                     max_tasks=1,
@@ -375,7 +297,6 @@ def execute_batch(
                         "campaign_batch_id": batch_id,
                         "campaign_fingerprint": fingerprint,
                         "campaign_stage": stage,
-                        "spending_reservation_usd": upper_usd,
                     },
                 )
             except BaseException as exc:
@@ -386,8 +307,6 @@ def execute_batch(
                     log_paths=[str(path.resolve()) for path in sorted(log_dir.glob("*.eval"))],
                 )
                 atomic_json(journal_path, journal)
-                # The reservation remains in the ledger. Never launch another
-                # batch or guess whether a cancelled request was billed.
                 raise
             journal.update(status="returned", returned_at=utc_now())
             atomic_json(journal_path, journal)
@@ -399,58 +318,15 @@ def execute_batch(
             batch_fingerprint=fingerprint,
             read_log_fn=read_log_fn,
         )
-        journal.update(coverage, updated_at=utc_now())
-        atomic_json(journal_path, journal)
-        try:
-            if reserved and reserved.get("status") in {"settled", "closed_reserved"}:
-                # A crash after ledger settlement but before journal replacement
-                # must neither repay nor lose the completed batch.
-                if not coverage["complete"]:
-                    raise CampaignError("Settled ledger has incomplete/mismatching batch logs")
-                _verify_settled_logs(reserved, coverage["log_paths"])
-                if reserved["status"] == "closed_reserved" and not reserved.get("closure", {}).get(
-                    "evidence", {}
-                ).get("completed_billing_only"):
-                    raise CampaignError(
-                        "Retained reservation is not a completed billing-only batch"
-                    )
-                settlement = reserved
-            else:
-                settlement = ledger.settle(
-                    batch_id,
-                    coverage["log_paths"],
-                    complete=coverage["complete"],
-                    api_key=os.getenv("OPENROUTER_API_KEY"),
-                )
-            if (
-                settlement["status"] == "blocked"
-                and getattr(ledger, "allow_unverified_billing", False)
-                and coverage["complete"]
-                and not coverage["sample_status_counts"].get("error", 0)
-            ):
-                settlement = ledger.close_completed_with_reservation(
-                    batch_id,
-                    coverage["log_paths"],
-                    evidence={
-                        "complete": coverage["complete"],
-                        "errors": coverage["errors"],
-                        "sample_status_counts": coverage["sample_status_counts"],
-                        "execution_finished": True,
-                        "provider": provider,
-                    },
-                )
-        except BaseException as exc:
-            journal.update(
-                status="blocked", settlement_error=type(exc).__name__, updated_at=utc_now()
-            )
-            atomic_json(journal_path, journal)
-            raise
-        status = (
-            "complete_reserved"
-            if settlement["status"] == "closed_reserved"
-            else settlement["status"]
+        journal.update(
+            coverage,
+            status="complete" if coverage["complete"] else "blocked",
+            log_fingerprints={
+                raw: hashlib.sha256(Path(raw).read_bytes()).hexdigest()
+                for raw in coverage["log_paths"]
+            },
+            updated_at=utc_now(),
         )
-        journal.update(status=status, settlement=settlement, updated_at=utc_now())
         atomic_json(journal_path, journal)
         emit(
             "batch_" + journal["status"],
@@ -458,7 +334,6 @@ def execute_batch(
             stage=stage,
             samples=len(ids),
             sample_status_counts=coverage["sample_status_counts"],
-            settlement=settlement,
         )
         return journal
 
@@ -532,8 +407,15 @@ def prepare_manifest(
         if not resume:
             raise CampaignError("Campaign exists; --resume is required")
         existing = read_json(path)
-        if existing.get("fingerprint") != key or any(
-            existing.get(k) != v for k, v in identity.items()
+        historical = {"budget_usd", "stage_budget_usd", "starting_spend_usd"}
+        old_config = {k: v for k, v in existing["config"].items() if k not in historical}
+        new_config = {k: v for k, v in config.items() if k not in historical}
+        saved_identity = {k: existing[k] for k in identity}
+        if (
+            existing.get("fingerprint") != fingerprint(saved_identity)
+            or old_config != new_config
+            or existing["cells"] != cells
+            or existing["source_hashes"] != hashes
         ):
             raise CampaignError(
                 "Resume configuration or source hashes differ from the frozen campaign"
@@ -595,10 +477,8 @@ def refresh_base_records(manifest: dict) -> None:
 def run_base(
     directory: Path,
     manifest: dict,
-    ledger,
     *,
     resume: bool,
-    bound_fn=openrouter_bound,
     task_factory=scheming,
     eval_fn=None,
     read_log_fn=None,
@@ -609,9 +489,7 @@ def run_base(
     for batch in manifest["batches"]:
         if source_hash_fn() != manifest["source_hashes"]:
             raise CampaignError("Source changed during the campaign; refusing further model calls")
-        log_dir = directory / "base" / batch["batch_id"]
-        journal_path = log_dir / "batch.json"
-        journal = read_json(journal_path) if journal_path.exists() else None
+        was_complete = batch["status"] in COMPLETE_BATCH_STATES
         if batch.get("recovery"):
             from .recovery import run_recovery_batch
 
@@ -619,40 +497,19 @@ def run_base(
                 directory,
                 manifest,
                 batch,
-                ledger,
                 resume=resume,
-                bound_fn=bound_fn,
                 task_factory=task_factory,
                 eval_fn=eval_fn,
                 read_log_fn=read_log_fn,
             )
-        elif journal and journal.get("status") in COMPLETE_BATCH_STATES:
-            reservation = _ledger_batch(ledger, batch["batch_id"])
-            if reservation is None or reservation.get("status") != ledger_status(journal["status"]):
-                raise CampaignError("Settled batch and ledger disagree")
-            _verify_settled_logs(reservation, journal.get("log_paths", []))
-            result = journal
         else:
-            # Resume a reservation without querying new prices or constructing a
-            # fresh agent task. The only allowed action is cost reconciliation.
-            reserved = _ledger_batch(ledger, batch["batch_id"])
-            if reserved or (journal and journal["status"] not in {"planned"}):
-                if not resume:
-                    raise CampaignError("A started/reserved batch needs explicit --resume")
-                upper = (journal or reserved).get("upper_usd", 0.0)
-                provider = (journal or {}).get("provider", {})
-                task = None
-            else:
-                bound = bound_fn(
-                    config["model"],
-                    len(batch["sample_ids"]),
-                    config["token_limit"],
-                    config["max_tokens"],
-                )
-                upper, provider = bound["conservative_max_usd"], bound["provider"]
-                batch["reservation"] = bound
-                manifest["provider_policy"] = bound
-                atomic_json(directory / "manifest.json", manifest)
+            log_dir = directory / "base" / batch["batch_id"]
+            path = log_dir / "batch.json"
+            journal = read_json(path) if path.exists() else None
+            if was_complete and (journal is None or journal["status"] not in COMPLETE_BATCH_STATES):
+                raise CampaignError("Completed batch is missing its completed execution journal")
+            task = None
+            if journal is None or journal["status"] == "planned":
                 task = sliced_task(
                     manifest["cells"][batch["cell_index"]],
                     batch,
@@ -663,14 +520,9 @@ def run_base(
                 task,
                 batch_id=batch["batch_id"],
                 log_dir=log_dir,
-                ledger=ledger,
-                upper_usd=upper,
                 stage="base",
                 model=config["model"],
-                provider=provider,
-                fingerprint=(journal or (reserved or {}).get("metadata", {})).get(
-                    "fingerprint", manifest["fingerprint"]
-                ),
+                fingerprint=(journal or {}).get("fingerprint", manifest["fingerprint"]),
                 expected_sample_ids=batch["sample_ids"],
                 max_samples=config["max_samples"],
                 resume=resume,
@@ -684,6 +536,8 @@ def run_base(
         )
         if result.get("canonical_log_records"):
             batch["canonical_log_records"] = result["canonical_log_records"]
+        if was_complete:
+            continue
         refresh_base_records(manifest)
         manifest.update(updated_at=utc_now(), status="running", current_batch=batch["batch_id"])
         if result["status"] not in COMPLETE_BATCH_STATES:
@@ -692,57 +546,22 @@ def run_base(
             return manifest
         manifest.pop("blocker", None)
         atomic_json(directory / "manifest.json", manifest)
+        completed = sum(
+            len(b["sample_ids"])
+            for b in manifest["batches"]
+            if b["status"] in COMPLETE_BATCH_STATES
+        )
         emit(
             "base_progress",
-            completed_samples=sum(
-                len(item["sample_ids"])
-                for item in manifest["batches"]
-                if item["status"] in COMPLETE_BATCH_STATES
-            ),
+            completed_samples=completed,
             total_samples=manifest["total_samples"],
-            budget=budget_summary(ledger.snapshot()),
+            spending=report_cost(directory),
         )
+        print(f"Base experiments: {completed}/{manifest['total_samples']} recorded", flush=True)
+    refresh_base_records(manifest)
     manifest.update(status="base_complete", updated_at=utc_now(), current_batch=None)
     atomic_json(directory / "manifest.json", manifest)
     return manifest
-
-
-def budget_summary(snapshot: dict) -> dict:
-    return {key: value for key, value in snapshot.items() if key != "batches"}
-
-
-def _local_budget_summary(state: dict) -> dict:
-    starting = Decimal(str(state["starting_spend_usd"]))
-    costs = Counter()
-    for entry in state.get("generations", {}).values():
-        if entry.get("owner_batch") is not None:
-            costs[entry["owner_batch"]] += Decimal(str(entry["cost_usd"]))
-    verified = starting + sum(costs.values(), Decimal(0))
-    retained = sum(
-        (
-            max(Decimal(str(batch["upper_usd"])) - costs[key], Decimal(0))
-            for key, batch in state["batches"].items()
-            if batch["status"] != "settled"
-        ),
-        Decimal(0),
-    )
-    return {
-        "limit_usd": float(state["limit_usd"]),
-        "verified_usd": float(verified),
-        "retained_reservation_usd": float(retained),
-        "committed_usd": float(verified + retained),
-        "remaining_usd": float(
-            max(Decimal(str(state["limit_usd"])) - verified - retained, Decimal(0))
-        ),
-        "pending_batches": [
-            {"batch_id": key, "status": value["status"], "errors": value.get("errors", [])}
-            for key, value in state["batches"].items()
-            if value["status"] not in {"settled", "closed_reserved"}
-        ],
-        "closed_reserved_batches": [
-            key for key, value in state["batches"].items() if value["status"] == "closed_reserved"
-        ],
-    }
 
 
 def campaign_status(directory: Path) -> dict:
@@ -771,7 +590,7 @@ def campaign_status(directory: Path) -> dict:
             completed += len(batch["sample_ids"])
         elif item["status"] in {"reserved", "started", "returned", "interrupted", "blocked"}:
             current.append(batch["batch_id"])
-    ledger_path = directory / "budget.json"
+    spending_path = directory / "spending.json"
     poststage_path = directory / "poststages.json"
     poststages = None
     if poststage_path.exists():
@@ -787,7 +606,8 @@ def campaign_status(directory: Path) -> dict:
         "sample_outcomes": dict(outcomes),
         "current_batches": current,
         "blocker": manifest.get("blocker"),
-        "budget": _local_budget_summary(read_json(ledger_path)) if ledger_path.exists() else None,
+        "spending": read_json(spending_path) if spending_path.exists() else None,
+        "spending_limit": None,
         "poststages": poststages,
     }
 
@@ -800,14 +620,6 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--status", action="store_true")
-    parser.add_argument(
-        "--allow-unverified-billing",
-        action="store_true",
-        help="Continue complete bounded batches with unknown bills by retaining their full reservation",
-    )
-    parser.add_argument("--budget-usd", type=float, default=50.0)
-    parser.add_argument("--stage-budget-usd", type=float, default=35.0)
-    parser.add_argument("--starting-spend-usd", type=float, default=0.0)
     parser.add_argument("--max-tokens", type=int, default=8000)
     parser.add_argument("--max-steps", type=int, default=20)
     parser.add_argument("--token-limit", type=int, default=100000)
@@ -822,65 +634,27 @@ def main(argv: list[str] | None = None) -> None:
         print(
             f"Campaign: {status['status']}\nBase samples recorded: "
             f"{status['base_samples_settled']}/{status['base_samples_total']}\n"
-            f"Batch states: {status['base_batches']}\nSample outcomes: {status['sample_outcomes']}"
+            f"Batch states: {status['base_batches']}\nSample outcomes: {status['sample_outcomes']}\n"
+            "Spending limit: none"
         )
-        if status["budget"]:
-            budget = status["budget"]
-            print(
-                f"Verified spend: ${budget['verified_usd']:.6f}; retained reservation: "
-                f"${budget['retained_reservation_usd']:.6f}; total committed: "
-                f"${budget['committed_usd']:.6f}/${budget['limit_usd']:.2f}"
-            )
-            if budget["pending_batches"]:
-                print("Pending billing: " + json.dumps(budget["pending_batches"]))
-            if budget["closed_reserved_batches"]:
-                print(
-                    "Batches with permanently retained reservations: "
-                    + ", ".join(budget["closed_reserved_batches"])
-                )
+        print("Latest optional cost report: " + json.dumps(status["spending"]))
         if status["current_batches"]:
             print("Current batches: " + ", ".join(status["current_batches"]))
         if status["blocker"]:
-            print(
-                "Blocker: "
-                + json.dumps(
-                    status["blocker"].get("settlement", status["blocker"].get("budget_blocker"))
-                )
-            )
+            print("Blocker: " + json.dumps(status["blocker"].get("errors", [])))
         if status["poststages"]:
-            post = status["poststages"]
-            print(f"Post stages: {post['status']}")
-            for stage, counts in post["stages"].items():
-                print(
-                    f"  {stage}: {counts['settled']}/{counts['planned']} settled; {counts['pending']} pending"
-                )
-            if post.get("blocked_batch"):
-                print("Blocked post-stage batch: " + str(post["blocked_batch"]))
-            if post.get("exclusions"):
-                print("Excluded sources: " + json.dumps(post["exclusions"]))
+            print("Post stages: " + json.dumps(status["poststages"]))
         return
-    if args.model != MODEL:
-        parser.error("This authorized campaign uses the same DeepSeek model as validation")
-    if any(
-        not math.isfinite(value)
-        for value in (args.budget_usd, args.stage_budget_usd, args.starting_spend_usd)
-    ):
-        parser.error("Budget values must be finite")
     if (
-        not 0 < args.stage_budget_usd <= args.budget_usd <= 50
-        or args.starting_spend_usd < 0
-        or args.starting_spend_usd >= args.budget_usd
-        or min(args.max_tokens, args.max_steps, args.token_limit, args.max_samples, args.batch_size)
+        min(args.max_tokens, args.max_steps, args.token_limit, args.max_samples, args.batch_size)
         < 1
     ):
-        parser.error(
-            "Require positive limits, 0 < stage budget <= total budget <= $50, and a valid prior balance"
-        )
+        parser.error("Execution limits must be positive")
     cells = [{**cell, "seed": args.seed} for cell in plan(args.profile)]
     config = {
         key: value
         for key, value in vars(args).items()
-        if key not in {"execute", "resume", "status", "campaign_dir", "allow_unverified_billing"}
+        if key not in {"execute", "resume", "status", "campaign_dir"}
     }
     config.update(
         first_batch_size=1,
@@ -899,47 +673,26 @@ def main(argv: list[str] | None = None) -> None:
             samples=sum(cell["n"] for cell in cells),
             config=config,
             campaign_dir=str(directory),
+            spending_limit=None,
         )
         return
     load_dotenv(ROOT / ".env", override=False)
     if not os.getenv("OPENROUTER_API_KEY"):
         parser.error("OPENROUTER_API_KEY is required for execution")
-    from .budget import CampaignLedger
-
     os.environ.setdefault("XDG_DATA_HOME", str(ROOT / "inspect-data"))
     with exclusive_lock(directory / ".campaign.lock"):
         manifest = prepare_manifest(
             directory, config=config, cells=cells, hashes=source_hashes(), resume=args.resume
         )
-        ledger = CampaignLedger(
-            directory / "budget.json",
-            limit_usd=args.budget_usd,
-            starting_spend_usd=args.starting_spend_usd,
-            stage_limits={"base": args.stage_budget_usd},
-            allow_unverified_billing=args.allow_unverified_billing,
-        )
-        atomic_json(
-            directory / "billing-policy.json",
-            {
-                "at": utc_now(),
-                "allow_unverified_billing": args.allow_unverified_billing,
-                "unknown_cost_policy": "retain_full_original_reservation",
-                "budget_usd": args.budget_usd,
-                "stage_budget_usd": args.stage_budget_usd,
-            },
-        )
-        manifest = run_base(directory, manifest, ledger, resume=args.resume)
+        manifest = run_base(directory, manifest, resume=args.resume)
         if manifest["status"] != "base_complete":
-            raise SystemExit(
-                f"Campaign stopped: {manifest['status']}; inspect --status before resuming"
-            )
+            raise SystemExit(f"Campaign stopped: {manifest['status']}; inspect --status")
         if args.poststages == "all":
             from .poststages import execute_poststages
 
             result = execute_poststages(
                 directory,
                 model=args.model,
-                ledger=ledger,
                 batch_size=args.batch_size,
                 max_samples=args.max_samples,
                 max_tokens=args.max_tokens,
@@ -952,11 +705,7 @@ def main(argv: list[str] | None = None) -> None:
             emit("poststages_result", result=result)
             if result["status"] not in {"complete", "complete_with_exclusions"}:
                 raise SystemExit(f"Post stages stopped: {result['status']}; inspect --status")
-        emit(
-            "campaign_finished",
-            budget=budget_summary(ledger.snapshot()),
-            base_logs=manifest["completed_base_logs"],
-        )
+        emit("campaign_finished", base_logs=manifest["completed_base_logs"])
 
 
 if __name__ == "__main__":

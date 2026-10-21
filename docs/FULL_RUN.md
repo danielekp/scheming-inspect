@@ -2,11 +2,11 @@
 
 The full reconstructed matrix has 65 experimental cells and 9,094 target rollouts for one model. The campaign uses `openrouter/deepseek/deepseek-v4-flash`, seed 42, 8,000 output tokens per call, and up to eight concurrent isolated samples. This is the same contemporary substitute used in validation, not the paper's historical model matrix.
 
-The total authorized spending ceiling is **$50**, including the earlier **$0.013229117** validation cost. The base stage has a $35 sublimit to preserve room for additional measurements. Unused base allocation remains available under the global cap. An allocation does not guarantee that every planned stage will fit.
+The user has authorized continuing this campaign **without spending caps**. The earlier $50 total cap and $35 base-stage sublimit no longer govern execution. Token limits and concurrency remain experiment settings; an optional spending counter is informational and never stops the run.
 
 ## Run and monitor
 
-From the repository root, `bash scripts/run_full.sh` starts the configured campaign. It refuses to overwrite an existing campaign. `bash scripts/run_full.sh --resume` reconciles an existing campaign before attempting any new batch. Do not run either command while another instance is active; the campaign lock prevents concurrent dispatch.
+From the repository root, `bash scripts/run_full.sh` starts the configured campaign. It refuses to overwrite an existing campaign. `bash scripts/run_full.sh --resume` continues from the recorded manifest and logs. Do not run either command while another instance is active; the campaign lock prevents concurrent dispatch.
 
 Check progress without calling a model:
 
@@ -20,7 +20,7 @@ Browse nested evaluation logs in Inspect View:
 uv run inspect view --recursive --log-dir logs/full-campaign --port 7576
 ```
 
-The viewer is at `http://127.0.0.1:7576`. Its samples show prompts, tool calls, scores, metadata and any errors. The campaign manifest and `budget.json` remain alongside the logs. An in-flight reservation is a cost ceiling, not a charge already billed.
+The viewer is at `http://127.0.0.1:7576`. Its samples show prompts, tool calls, scores, metadata and any errors. The campaign manifest remains alongside the logs. The historical `budget.json` is preserved read-only; its old reservations are not current spending controls or a complete bill for the continuing run. When enabled, `spending.json` holds the latest optional API-key usage observation.
 
 Analyze the base matrix separately from the later stages so rescored copies or continuations are not mistaken for extra base samples:
 
@@ -42,26 +42,20 @@ Fixed follow-ups and interrogations use the main hard, nudged, conflicting-goal,
 
 ## Spending and restart behavior
 
-The original simple runner reserved the worst-case cost of the entire matrix upfront. At the checked rates, its full-matrix reservation was about $1,914; this was not an expected bill. The campaign instead reserves the maximum cost of a batch before making requests, then reconciles exact OpenRouter generation charges before releasing unused reservation. Provider price ceilings, output/token limits and disabled client retries bound each batch.
+The campaign no longer reserves funds, reconciles generation bills before continuing, or stops at a financial threshold. Its historical ledger and billing-policy records remain unchanged for audit. Earlier statuses such as `complete_reserved` describe the accounting policy that was active when those results were recorded; the completed samples remain part of the same experiment.
 
-The ledger is written atomically and protected by a file lock. Request IDs are deduplicated, including repeated source events in rescored logs. Inspect cache reads are not new paid requests. Read-only billing lookups may be retried; model generations are not automatically retried.
+The optional reporter makes one read-only request to OpenRouter's API-key endpoint, with a three-second timeout and no retries. Its `key_total_usd` value is cumulative usage for that API key. It can include earlier runs and concurrent activity outside this campaign, so it must not be presented as an exact campaign cost. A missing key, unavailable or malformed response, or failed report write produces an unavailable observation and does not block execution. No cost observation authorizes replaying a completed sample.
 
-The full-run launcher now passes `--allow-unverified-billing`, as authorized on 21 October 2026. When every sample is recorded and only billing availability is uncertain, the runner verifies the original execution bounds and permanently retains the **entire original batch reservation**. The execution journal reports `complete_reserved`; the financial ledger reports `closed_reserved`, with `actual_usd: null`. These samples enter analysis exactly once, and the next batch can run if its reservation fits under the unchanged $50 total and $35 base-stage caps. Missing bills are never treated as zero cost. Retained allowances can exhaust the cap even when verified spending is lower.
+Resuming uses the existing manifest and logs, verifies the experiment's configuration and source revision, and preserves recorded results. An already-started batch is checked from its logs before any new work is dispatched. Source migrations are recorded explicitly so accounting changes remain distinguishable from changes to experimental prompts, samples, scorers, or generation settings. Do not edit sources while the campaign is running or start a second instance.
 
-This option does not bypass missing or changed logs, incomplete coverage, sample errors, retries that undermine the bound, or charges above the reservation. Without the option, billing remains strict; the older wrapper retries temporary billing-record lookup failures for up to 15 minutes. Neither mode regenerates a completed batch. The runtime choice is recorded in `billing-policy.json` and does not change prompts, samples, scorers, or generation settings.
-
-Resuming uses the existing manifest and logs. It verifies the configuration and source fingerprint and does not silently replay an already-started batch. Do not delete the ledger, change the source while the campaign runs, or start a second campaign to bypass a stop. A stopped or budget-limited campaign remains explicitly incomplete.
-
-For the stopped campaign that predates this accounting change, `scripts/migrate_billing_policy.py` records an explicit accounting-only source revision and archives the prior manifest, ledger, and blocked journal. It does not alter results, financial limits, or experimental settings. The subsequent ordinary resume reconciles the existing log before starting new samples.
-
-An explicitly prepared recovery can continue after a scorer or infrastructure failure. It archives the previous manifest, records the code revision, preserves every non-error outcome (including invalid answers and limits), and selects only errored or unrecorded cases for a new attempt. The original partial log stays unchanged. If interrupted requests have unknown charges, their full original reservation remains permanently committed under `closed_reserved`; it is not reported as verified spending. Recovery attempts require an additional reservation under the same $50 cap.
+An explicitly prepared recovery can continue after a scorer or infrastructure failure. It archives the previous manifest, records the code revision, preserves every non-error outcome (including invalid answers and limits), and selects only errored or unrecorded cases for a new attempt. The original partial log stays unchanged. Historical reservations with unknown charges remain historical accounting evidence; they neither establish the actual cost nor stop the uncapped continuation.
 
 Use the `--campaign-dir` analysis command above after recovery. Its canonical sample selections prevent failed and replacement attempts from counting twice, and `summary.json` records the excluded attempts and source revisions. Reading all raw logs together would lose this distinction.
 
 ## Interpretation
 
-The saved smoke run suggests roughly $10.50 for the base matrix if its average cost generalized, but eight cases are a weak cost sample. Follow-up counts and reasoning lengths can materially change the final cost. One fixed source-action creates 160 continuations and their grader calls. The $50 cap takes precedence over completing all stages.
+The saved smoke run suggests roughly $10.50 for the base matrix if its average cost generalized, but eight cases are a weak cost sample. Follow-up counts and reasoning lengths can materially change the final cost. One fixed source-action creates 160 continuations and their grader calls. This estimate is not a limit on the now-uncapped campaign.
 
-The serial smoke timings extrapolate to several days for the full base matrix. Concurrency should reduce wall time, but provider latency, Docker startup and billing reconciliation still make this a long run. Progress should be assessed from completed counts, not a promised finish time.
+The serial smoke timings extrapolate to several days for the full base matrix. Concurrency should reduce wall time, but provider latency and Docker startup still make this a long run. Progress should be assessed from completed counts, not a promised finish time.
 
 Reports must retain infrastructure errors, invalid completions, truncations and excluded source cases. Observed actions and semantic judgments remain separate. Completion of this campaign would validate this reconstructed dataset and contemporary model; it would not recover the authors' withheld benchmark or reproduce their numerical results exactly.

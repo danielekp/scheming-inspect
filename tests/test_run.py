@@ -1,139 +1,151 @@
+"""Standalone runner wiring; all model and reporting calls are mocked."""
+
 import json
 from types import SimpleNamespace
 
+import httpx
 import pytest
-from inspect_ai.model import GenerateConfig, get_model
 
 from scheming_inspect import run
 
 
-def catalog(pricing=None):
-    return SimpleNamespace(
-        raise_for_status=lambda: None,
-        json=lambda: {
-            "data": [
-                {
-                    "id": "test/model",
-                    "context_length": 1000,
-                    "pricing": pricing or {"prompt": "0.000001", "completion": "0.000002"},
-                }
-            ]
-        },
-    )
-
-
-def test_spending_bound_reserves_overshoot(monkeypatch):
-    monkeypatch.setattr(run.httpx, "get", lambda *a, **kw: catalog())
-    quote = run.openrouter_bound("openrouter/test/model", 3, 10000, 100)
-    assert quote["conservative_max_usd"] >= 3 * (10000 + 1000 + 100) * 0.000002
-    assert quote["provider"] == {
-        "max_price": {"prompt": 1.0, "completion": 2.0, "request": 0},
-        "require_parameters": True,
-    }
-    assert quote["cache_prompt"] is False
-    assert quote["budget_policy"] == "provider-rate-caps-v1"
-
-
-@pytest.mark.parametrize(
-    "fee", ["request", "image", "web_search", "internal_reasoning", "future_fee"]
-)
-def test_extra_cost_components_fail_closed(monkeypatch, fee):
-    monkeypatch.setattr(
-        run.httpx,
-        "get",
-        lambda *a, **kw: catalog({"prompt": "0", "completion": "0", fee: "1"}),
-    )
-    with pytest.raises(ValueError, match="pricing components"):
-        run.openrouter_bound("openrouter/test/model", 1, 100, 100)
-
-
-@pytest.mark.parametrize("field", ["prompt", "completion"])
-@pytest.mark.parametrize("bad_rate", ["-0.001", "NaN", "Infinity", "-Infinity", None, True])
-def test_each_token_rate_must_be_finite_and_nonnegative(monkeypatch, field, bad_rate):
-    pricing = {"prompt": "0.000001", "completion": "0.000002", field: bad_rate}
-    monkeypatch.setattr(run.httpx, "get", lambda *a, **kw: catalog(pricing))
-    with pytest.raises(ValueError, match="pricing/context"):
-        run.openrouter_bound("openrouter/test/model", 1, 100, 100)
-
-
-def test_free_rates_still_enforce_zero_caps(monkeypatch):
-    monkeypatch.setattr(
-        run.httpx, "get", lambda *a, **kw: catalog({"prompt": "0", "completion": "0"})
-    )
-    quote = run.openrouter_bound("openrouter/test/model", 1, 100, 100)
-    assert quote["conservative_max_usd"] == 0
-    assert quote["provider"]["max_price"] == {"prompt": 0, "completion": 0, "request": 0}
-
-
-def test_missing_token_rate_fails_closed(monkeypatch):
-    monkeypatch.setattr(run.httpx, "get", lambda *a, **kw: catalog({"completion": "0.000002"}))
-    with pytest.raises(ValueError, match="pricing/context"):
-        run.openrouter_bound("openrouter/test/model", 1, 100, 100)
-
-
-def test_inspect_openrouter_adapter_forwards_cap_without_generation(monkeypatch):
-    monkeypatch.setattr(run.httpx, "get", lambda *a, **kw: catalog())
-    provider = run.openrouter_bound("openrouter/test/model", 1, 100, 100)["provider"]
-    # Construct the installed adapter and inspect its outgoing parameters only.
-    # The dummy key is not usable; no model.generate or HTTP request is made.
-    model = get_model(
-        "openrouter/test/model",
-        api_key="test-only-not-a-real-key",
-        provider=provider,
-        memoize=False,
-    )
-    params = model.api.completion_params(
-        GenerateConfig(max_tokens=100, cache_prompt=False), tools=True
-    )
-    assert params["extra_body"]["provider"] == provider
-
-
-def test_execution_forwards_and_records_provider_caps(monkeypatch, tmp_path):
+@pytest.fixture
+def execution(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-only-not-a-real-key")
     monkeypatch.setattr(run, "load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.setattr(run, "ROOT", tmp_path)
     for name in ("uv.lock", "Dockerfile", "compose.yaml"):
         (tmp_path / name).write_text("offline fixture", encoding="utf-8")
-    monkeypatch.setattr(run.httpx, "get", lambda *a, **kw: catalog())
+    monkeypatch.setattr(
+        httpx, "get", lambda *_a, **_k: pytest.fail("Unexpected pricing/network call")
+    )
     monkeypatch.setattr(run, "scheming", lambda **kwargs: kwargs)
-    captured = {}
+    captured = {"reports": []}
 
     def fake_eval(tasks, **kwargs):
-        captured.update(kwargs)
-        assert len(tasks) == 8
+        captured.update(kwargs, tasks=tasks)
         return [SimpleNamespace(status="success", samples=[])]
 
+    def fake_report(directory):
+        captured["reports"].append(directory)
+        return {"status": "unavailable", "key_total_usd": None}
+
     monkeypatch.setattr(run, "eval", fake_eval)
+    monkeypatch.setattr(run, "report_cost", fake_report)
+    return captured
+
+
+def test_execution_preserves_experiment_settings_without_financial_gates(
+    monkeypatch, tmp_path, execution
+):
     monkeypatch.setattr("sys.argv", ["run", "--execute", "--model", "openrouter/test/model"])
     run.main()
-    expected = {
-        "max_price": {"prompt": 1.0, "completion": 2.0, "request": 0},
-        "require_parameters": True,
-    }
-    assert captured["model_args"] == {"provider": expected}
-    assert captured["cache_prompt"] is False
-    assert captured["max_retries"] == captured["retry_on_error"] == 0
+    assert len(execution["tasks"]) == 8
+    assert execution["model"] == "openrouter/test/model"
+    assert execution["max_samples"] == execution["max_tasks"] == 1
+    assert execution["cache_prompt"] is False
+    assert execution["max_retries"] == execution["retry_on_error"] == 0
+    assert execution["log_model_api"] is True
+    assert "model_args" not in execution
+    assert set(execution["metadata"]) == {"reconstruction", "source_hashes"}
     saved = json.loads((tmp_path / "logs" / "smoke" / "run-plan.json").read_text())
-    assert saved["reservation"]["provider"] == expected
-    assert saved["reservation"]["budget_policy"] == "provider-rate-caps-v1"
-    assert captured["metadata"]["spending_reservation"]["provider"] == expected
+    assert set(saved) == {"arguments", "cells", "source_hashes"}
+    assert "budget_usd" not in saved["arguments"]
+    assert execution["reports"] == [tmp_path / "logs" / "smoke"]
 
 
-def test_dry_plan_cannot_call_provider(monkeypatch, capsys):
+def test_filter_repetitions_seed_and_limits_reach_tasks(monkeypatch, execution, tmp_path):
+    log_dir = tmp_path / "custom-logs"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run",
+            "--execute",
+            "--profile",
+            "smoke",
+            "--experiment",
+            "alignment",
+            "--n",
+            "3",
+            "--seed",
+            "17",
+            "--max-tokens",
+            "123",
+            "--max-steps",
+            "7",
+            "--token-limit",
+            "4567",
+            "--log-dir",
+            str(log_dir),
+        ],
+    )
+    run.main()
+    assert len(execution["tasks"]) == 2
+    assert {task["condition"] for task in execution["tasks"]} == {"testing", "deployment"}
+    for task in execution["tasks"]:
+        assert task["n"] == 3
+        assert task["seed"] == 17
+        assert task["max_tokens"] == 123
+        assert task["max_steps"] == 7
+        assert task["token_limit"] == 4567
+    assert execution["log_dir"] == str(log_dir)
+
+
+def test_dry_plan_never_calls_models_or_cost_endpoint(monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["run", "--profile", "smoke"])
-    monkeypatch.setattr(run.httpx, "get", lambda *a, **kw: pytest.fail("Network used for dry plan"))
-    monkeypatch.setattr(run, "eval", lambda *a, **kw: pytest.fail("Models run for dry plan"))
+    monkeypatch.setattr(run, "eval", lambda *_a, **_k: pytest.fail("Model call"))
+    monkeypatch.setattr(run, "report_cost", lambda *_a: pytest.fail("Cost lookup"))
     run.main()
     assert "Plan only" in capsys.readouterr().out
 
 
-def test_budget_rejection_precedes_model_calls(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-only-not-a-real-key")
-    monkeypatch.setattr(
-        "sys.argv",
-        ["run", "--execute", "--model", "openrouter/test/model", "--budget-usd", ".00001"],
-    )
-    monkeypatch.setattr(run.httpx, "get", lambda *a, **kw: catalog())
-    monkeypatch.setattr(run, "eval", lambda *a, **kw: pytest.fail("Over-budget run executed"))
+@pytest.mark.parametrize(
+    "option,value",
+    [
+        ("--n", "0"),
+        ("--max-tokens", "0"),
+        ("--max-steps", "-1"),
+        ("--token-limit", "0"),
+        ("--experiment", "absent"),
+        ("--budget-usd", "5"),
+    ],
+)
+def test_invalid_options_stop_before_dispatch(monkeypatch, option, value):
+    monkeypatch.setattr("sys.argv", ["run", "--execute", option, value])
+    monkeypatch.setattr(run, "eval", lambda *_a, **_k: pytest.fail("Model call"))
+    with pytest.raises(SystemExit) as exc:
+        run.main()
+    assert exc.value.code == 2
+
+
+def test_openrouter_still_requires_credentials(monkeypatch, execution):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr("sys.argv", ["run", "--execute"])
+    monkeypatch.setattr(run, "eval", lambda *_a, **_k: pytest.fail("Model call"))
     with pytest.raises(SystemExit):
         run.main()
+
+
+def test_other_inspect_providers_do_not_require_openrouter_key(monkeypatch, execution):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr("sys.argv", ["run", "--execute", "--model", "mockllm/model"])
+    run.main()
+    assert execution["model"] == "mockllm/model"
+    assert len(execution["reports"]) == 1
+
+
+def test_completed_eval_errors_remain_visible_with_optional_report(monkeypatch, execution):
+    monkeypatch.setattr("sys.argv", ["run", "--execute"])
+    monkeypatch.setattr(
+        run,
+        "eval",
+        lambda *_a, **_k: [
+            SimpleNamespace(
+                status="success",
+                samples=[SimpleNamespace(error="infrastructure error")],
+            )
+        ],
+    )
+    with pytest.raises(SystemExit, match="Run has errors"):
+        run.main()
+    assert len(execution["reports"]) == 1
