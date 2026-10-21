@@ -6,9 +6,10 @@ The caller must explicitly assert ``complete=True`` only after matching terminal
 logs to its durable manifest of expected tasks/samples. This module cannot prove
 that an unlogged remote request did not happen.
 
-Unknown charges, incomplete logs, missing IDs, or failed billing checks block all new
-reservations. Known costs are still saved, but the full reservation remains until
-the batch is reconciled successfully. An explicitly audited, stopped batch may
+By default, unknown charges, incomplete logs, missing IDs, or failed billing checks
+block all new reservations. The opt-in completed-batch policy may instead close
+verified complete execution with its entire reservation retained. Known costs are
+still saved; no uncertain charge is treated as zero. An audited, stopped batch may
 instead be closed with its full reservation permanently retained. Such closure
 does not establish its actual cost and cannot be silently settled or rerun.
 JSON writes use fsync + atomic replacement;
@@ -26,6 +27,7 @@ import io
 import json
 import math
 import os
+import re
 import tempfile
 import time
 from contextlib import contextmanager
@@ -57,6 +59,10 @@ class BillingError(BudgetError):
     pass
 
 
+class BillingIntegrityError(BillingError):
+    """A billing record contradicts its identity or numeric accounting contract."""
+
+
 def _money(value: Any, name: str = "amount") -> Decimal:
     if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
         raise BudgetError(f"{name} must be a finite nonnegative number.")
@@ -75,15 +81,17 @@ def _now() -> str:
 
 def _generation_cost(data: Any, response_id: str) -> Decimal:
     if not isinstance(data, dict) or data.get("id") != response_id:
-        raise BillingError("Billing metadata has a missing or mismatched generation ID.")
+        raise BillingIntegrityError("Billing metadata has a missing or mismatched generation ID.")
     cost = data.get("total_cost")
     # Provider JSON specifies a numeric amount; strings/nulls are not settled.
-    if isinstance(cost, bool) or not isinstance(cost, (int, float, Decimal)):
+    if cost is None:
         raise BillingError("Billing cost is unavailable or malformed.")
+    if isinstance(cost, bool) or not isinstance(cost, (int, float, Decimal)):
+        raise BillingIntegrityError("Billing cost is unavailable or malformed.")
     try:
         return _money(cost, "billing cost")
     except BudgetError as exc:
-        raise BillingError("Billing cost is unavailable or malformed.") from exc
+        raise BillingIntegrityError("Billing cost is unavailable or malformed.") from exc
 
 
 def fetch_generation(
@@ -120,6 +128,8 @@ def fetch_generation(
             try:
                 data = response.json()["data"]
                 _generation_cost(data, response_id)
+            except BillingIntegrityError:
+                raise
             except (ValueError, KeyError, TypeError, BillingError):
                 failure = "invalid or unavailable billing metadata"
                 continue
@@ -339,7 +349,13 @@ class CampaignLedger:
         starting_spend_usd: float | str = 0,
         stage_limits: Mapping[str, float | str] | None = None,
         starting_generations: Mapping[str, float | str] | None = None,
+        *,
+        allow_unverified_billing: bool = False,
     ) -> None:
+        if not isinstance(allow_unverified_billing, bool):
+            raise BudgetError("allow_unverified_billing must be a boolean.")
+        # Runtime policy only: opting in never changes the ledger's financial identity.
+        self.allow_unverified_billing = allow_unverified_billing
         self.path = Path(path).expanduser().resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock_path = self.path.with_name(self.path.name + ".lock")
@@ -514,8 +530,9 @@ class CampaignLedger:
     ) -> dict[str, Any]:
         """Close stopped work without releasing a cent of its original ceiling.
 
-        This is an explicit audited recovery operation, never an automatic error
-        handler. The caller must verify the worker has stopped and include
+        This is an audited recovery operation. Automatic use is restricted to
+        the validated ``close_completed_with_reservation`` path. The caller must
+        verify the worker has stopped and include
         ``bounded_execution_confirmed=True`` in evidence after checking that the
         original rate/token caps and no-retry policy covered every request.
         Logs must match the last blocked reconciliation exactly. The closure is
@@ -562,6 +579,8 @@ class CampaignLedger:
                 )
             if _owned_cost(state, batch_id) > _money(batch["upper_usd"]):
                 raise BudgetError("Known charges exceed the original bound; closure is refused.")
+            if audit_evidence.get("completed_billing_only") is True:
+                self._validate_completed_closure(batch, logs, observed, audit_evidence)
             batch["closure"] = {
                 "closed_at": _now(),
                 "reason": reason.strip(),
@@ -575,6 +594,151 @@ class CampaignLedger:
             batch["status"] = "closed_reserved"
             self._save(state)
             return self._batch_view(state, batch_id)
+
+    def close_completed_with_reservation(
+        self,
+        batch_id: str,
+        logs: Sequence[str | Path],
+        *,
+        evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Opt in to continuing completed work while retaining its entire ceiling.
+
+        The caller supplies ``complete``, ``errors``, ``sample_status_counts``,
+        ``execution_finished``, and the original journal ``provider``. Immutable
+        logs must independently confirm complete, error-free samples and the
+        reserved runner's rate/token/no-retry settings. Unknown bills remain
+        unknown; this performs no billing calls and never releases the ceiling.
+        """
+        if not self.allow_unverified_billing:
+            raise BudgetError("Completed reservation closure requires explicit policy opt-in.")
+        if not isinstance(evidence, dict):
+            raise BudgetError("Completed closure requires structured coverage evidence.")
+        return self.close_with_reservation(
+            batch_id,
+            logs,
+            reason="Completed bounded batch; retain full reservation for unverified billing.",
+            process_stopped=evidence.get("execution_finished") is True,
+            evidence={
+                **evidence,
+                "completed_billing_only": True,
+                # This is validated under the ledger lock before it can be persisted.
+                "bounded_execution_confirmed": True,
+            },
+        )
+
+    def _validate_completed_closure(
+        self, batch: dict, logs: Sequence[str | Path], observed: dict, evidence: dict
+    ) -> None:
+        """Validate the opt-in completion path while holding the ledger lock."""
+        if not self.allow_unverified_billing:
+            raise BudgetError("Completed reservation closure requires explicit policy opt-in.")
+        counts = evidence.get("sample_status_counts")
+        if (
+            evidence.get("complete") is not True
+            or evidence.get("execution_finished") is not True
+            or evidence.get("errors") != []
+            or not isinstance(counts, dict)
+            or counts.get("error", 0) != 0
+            or any(type(value) is not int or value < 0 for value in counts.values())
+            or sum(counts.values()) != observed["samples"]
+            or observed["warnings"]
+        ):
+            raise BudgetError("Completed closure requires complete coverage without sample errors.")
+        allowed_errors = {
+            "A model request failed or remains pending; charges may be unknown.",
+            "A noncached model event has no exact OpenRouter generation ID.",
+        }
+        errors = batch.get("errors", [])
+        if not errors or any(
+            error not in allowed_errors
+            and not re.fullmatch(
+                r"Billing unavailable for gen-[A-Za-z0-9_-]+ \(BillingError\)\.", error
+            )
+            for error in errors
+        ):
+            raise BudgetError("Completed closure only permits unavailable billing evidence.")
+        if any(error not in allowed_errors for error in observed["errors"]):
+            raise BudgetError("Completed closure found incomplete or inconsistent accounting logs.")
+        provider = evidence.get("provider")
+        if not isinstance(provider, dict) or provider.get("require_parameters") is not True:
+            raise BudgetError("Completed closure requires the original enforced provider caps.")
+        prices = provider.get("max_price", {})
+        if not isinstance(prices, dict) or set(prices) != {"prompt", "completion", "request"}:
+            raise BudgetError("Completed closure requires both rates and zero request fees.")
+        if _money(prices["request"]) != 0:
+            raise BudgetError("Completed closure does not support per-request fees.")
+        _money(prices["prompt"])
+        _money(prices["completion"])
+        identity = batch.get("metadata", {})
+        expected_ids = identity.get("sample_ids")
+        if not isinstance(expected_ids, list) or not expected_ids:
+            raise BudgetError("Completed closure requires the original reserved sample inventory.")
+        seen = []
+        for path in sorted({Path(raw).expanduser().resolve() for raw in logs}):
+            raw = path.read_bytes()
+            if hashlib.sha256(raw).hexdigest() != observed["log_fingerprints"].get(str(path)):
+                raise BudgetError("Closure logs changed during validation.")
+            with io.BytesIO(raw) as stream:
+                log = read_eval_log(stream, format="json" if path.suffix == ".json" else "eval")
+            spec = getattr(log, "eval", None)
+            config = getattr(spec, "config", None)
+            plan_config = getattr(getattr(log, "plan", None), "config", None)
+            metadata = getattr(spec, "metadata", None) or {}
+            if (
+                log.status != "success"
+                or getattr(spec, "model", None) != identity.get("model")
+                or metadata.get("campaign_batch_id") != batch["id"]
+                or metadata.get("campaign_fingerprint") != identity.get("fingerprint")
+                or metadata.get("campaign_stage") != batch["stage"]
+                or _money(metadata.get("spending_reservation_usd")) != _money(batch["upper_usd"])
+                or (getattr(spec, "model_args", None) or {}).get("provider") != provider
+                or getattr(config, "epochs", None) != 1
+                or getattr(config, "retry_on_error", None) != 0
+                or type(getattr(config, "token_limit", None)) is not int
+                or config.token_limit <= 0
+            ):
+                raise BudgetError(
+                    "Completed closure log identity or reserved execution caps differ."
+                )
+            self._check_generation_caps(plan_config)
+            roles = getattr(spec, "model_roles", None) or {}
+            if set(roles) != set(identity.get("model_roles", {})):
+                raise BudgetError("Completed closure model roles differ from the reservation.")
+            for name, role in roles.items():
+                if (
+                    getattr(role, "model", None) != identity["model_roles"][name]
+                    or (getattr(role, "args", None) or {}).get("provider") != provider
+                ):
+                    raise BudgetError("Completed closure role provider caps differ.")
+                self._check_generation_caps(getattr(role, "config", None), require_tokens=False)
+            for sample in log.samples or []:
+                if sample.error or getattr(sample, "invalidation", None) or sample.epoch != 1:
+                    raise BudgetError(
+                        "Completed closure requires error-free original sample outcomes."
+                    )
+                seen.append(str(sample.id))
+                for event in _events(sample.events or []):
+                    if event.event == "model" and getattr(event, "cache", None) != "read":
+                        self._check_generation_caps(getattr(event, "config", None))
+                        if event.config.max_tokens > plan_config.max_tokens:
+                            raise BudgetError("Model event exceeded the reserved completion limit.")
+        if sorted(seen) != sorted(str(value) for value in expected_ids):
+            raise BudgetError("Completed closure sample IDs differ from the original reservation.")
+
+    @staticmethod
+    def _check_generation_caps(config: Any, *, require_tokens: bool = True) -> None:
+        if (
+            getattr(config, "max_retries", None) != 0
+            or getattr(config, "cache_prompt", None) is not False
+            or (
+                require_tokens
+                and (type(getattr(config, "max_tokens", None)) is not int or config.max_tokens <= 0)
+            )
+        ):
+            raise BudgetError(
+                "Completed closure requires capped tokens and no model retries/cache."
+            )
 
     def settle(
         self,

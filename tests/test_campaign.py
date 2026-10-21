@@ -8,7 +8,15 @@ import httpx
 import pytest
 from inspect_ai.dataset import MemoryDataset, Sample
 from inspect_ai.event import ModelEvent
-from inspect_ai.log import EvalConfig, EvalDataset, EvalLog, EvalSample, EvalSpec, write_eval_log
+from inspect_ai.log import (
+    EvalConfig,
+    EvalDataset,
+    EvalLog,
+    EvalPlan,
+    EvalSample,
+    EvalSpec,
+    write_eval_log,
+)
 from inspect_ai.model import GenerateConfig, ModelOutput, get_model
 
 from scheming_inspect import budget, campaign
@@ -405,6 +413,99 @@ def test_base_runner_persists_cell_mapping_and_compact_status(tmp_path, billing)
     assert status["base_samples_settled"] == status["base_samples_total"] == 3
     assert status["budget"]["verified_usd"] == 0.03
     assert "generations" not in status["budget"] and "batches" not in status["budget"]
+
+
+def bounded_log(task, kwargs, *, missing_bill=False):
+    log = create_log(task, kwargs)
+    log.eval.config.retry_on_error = 0
+    log.eval.config.token_limit = 100000
+    log.eval.model_args = kwargs["model_args"]
+    log.plan = EvalPlan(config=GenerateConfig(max_retries=0, max_tokens=8000, cache_prompt=False))
+    for sample in log.samples:
+        sample.events[0].config = log.plan.config
+    if missing_bill:
+        log.samples[0].events[0].output.response_id = None
+    write_eval_log(log, Path(kwargs["log_dir"]) / "result.eval")
+    return [log]
+
+
+def test_unknown_bill_keeps_reservation_and_base_progress_without_rerunning(tmp_path, billing):
+    manifest = campaign.prepare_manifest(
+        tmp_path,
+        config=config(),
+        cells=[dict(experiment="oversight", n=3, seed=42)],
+        hashes={"code": "frozen"},
+        resume=False,
+        task_factory=task_factory,
+    )
+    ledger = CampaignLedger(tmp_path / "budget.json", limit_usd=2, allow_unverified_billing=True)
+    dispatches = []
+
+    def evaluator(task, **kwargs):
+        dispatches.append([sample.id for sample in task.dataset])
+        return bounded_log(task, kwargs, missing_bill=len(dispatches) == 1)
+
+    result = campaign.run_base(
+        tmp_path,
+        manifest,
+        ledger,
+        resume=False,
+        bound_fn=lambda *_: {"conservative_max_usd": 1, "provider": PROVIDER},
+        task_factory=task_factory,
+        eval_fn=evaluator,
+        source_hash_fn=lambda: {"code": "frozen"},
+    )
+    assert result["status"] == "base_complete"
+    assert [batch["status"] for batch in result["batches"]] == ["complete_reserved", "settled"]
+    assert len(dispatches) == 2
+    assert campaign.campaign_status(tmp_path)["base_samples_settled"] == 3
+    assert sum(len(row["expected_sample_ids"]) for row in result["completed_base_log_records"]) == 3
+    assert ledger.snapshot()["committed_usd"] == pytest.approx(1.02)
+    assert ledger.snapshot()["verified_usd"] == pytest.approx(0.02)
+    assert not ledger.pending()
+    campaign.run_base(
+        tmp_path,
+        result,
+        ledger,
+        resume=True,
+        eval_fn=lambda *_a, **_k: pytest.fail("reran recorded samples"),
+        bound_fn=lambda *_: pytest.fail("repriced recorded samples"),
+        source_hash_fn=lambda: {"code": "frozen"},
+    )
+    with pytest.raises(budget.BudgetExceeded):
+        ledger.reserve("over_remaining_cap", 0.99)
+
+
+def test_resume_after_cost_retention_before_journal_write_does_not_dispatch(
+    tmp_path, billing, monkeypatch
+):
+    ledger = CampaignLedger(tmp_path / "ledger.json", allow_unverified_billing=True)
+    atomic = campaign.atomic_json
+
+    def interrupted(path, value):
+        if Path(path).name == "batch.json" and value.get("status") == "complete_reserved":
+            raise OSError("after retaining cost, before saving completed journal")
+        atomic(path, value)
+
+    monkeypatch.setattr(campaign, "atomic_json", interrupted)
+    with pytest.raises(OSError):
+        execute(tmp_path, ledger, lambda task, **kw: bounded_log(task, kw, missing_bill=True))
+    assert campaign._ledger_batch(ledger, "batch-one")["status"] == "closed_reserved"
+    monkeypatch.setattr(campaign, "atomic_json", atomic)
+    result = execute(
+        tmp_path, ledger, lambda *_a, **_k: pytest.fail("replayed completed work"), resume=True
+    )
+    assert result["status"] == "complete_reserved"
+    assert result["settlement"]["actual_usd"] is None
+    assert ledger.snapshot()["committed_usd"] == 1
+
+
+def test_billing_opt_in_is_not_an_experimental_config_change(tmp_path, capsys):
+    campaign.main(["--campaign-dir", str(tmp_path)])
+    strict = json.loads(capsys.readouterr().out)
+    campaign.main(["--campaign-dir", str(tmp_path), "--allow-unverified-billing"])
+    tolerant = json.loads(capsys.readouterr().out)
+    assert strict["config"] == tolerant["config"]
 
 
 def test_plan_has_no_network_side_effects(monkeypatch, tmp_path, capsys):

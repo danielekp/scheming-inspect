@@ -25,6 +25,7 @@ from inspect_ai.model import GenerateConfig, ModelOutput
 from inspect_ai.solver import solver
 
 from . import followups as f
+from .campaign import COMPLETE_BATCH_STATES
 from .judge import semantic_audit
 from .protocol import COVERT, plan
 
@@ -122,7 +123,7 @@ def canonical_log_records(base: dict, *, require_complete: bool = False) -> list
                 "expected_sample_ids": batch["sample_ids"],
             }
             for batch in base["batches"]
-            if batch["status"] == "settled"
+            if batch["status"] in COMPLETE_BATCH_STATES
             for path in batch.get("log_paths", [])
         ]
     result, selected, paths = [], set(), set()
@@ -169,9 +170,9 @@ def record_accepts_log(record: dict, status: str) -> bool:
 def discover_sources(base: dict, model: str, read_log_fn: Callable = _read_log) -> dict:
     """Validate canonical sources individually and retain superseded-attempt provenance."""
     if base.get("status") != "base_complete" or any(
-        b["status"] != "settled" for b in base["batches"]
+        b["status"] not in COMPLETE_BATCH_STATES for b in base["batches"]
     ):
-        raise ValueError("Post-stages require a completed, settled base campaign.")
+        raise ValueError("Post-stages require a completed, budget-accounted base campaign.")
     records, excluded, recovery_excluded, hashes, seen = {}, [], [], {}, set()
     requested = Counter(
         {"audit_main": 0, "audit_remaining": 0, "fixed_sources": 0, "interrogation_sources": 0}
@@ -690,7 +691,7 @@ def execute_poststages(
     if resume:
         # Revalidate settled log fingerprints/ledger identity without generating.
         for old in manifest["batches"]:
-            if old["status"] != "settled":
+            if old["status"] not in COMPLETE_BATCH_STATES:
                 continue
             roles = {"grader": model} | (
                 {"interrogator": model} if old["stage"] == "interrogation" else {}
@@ -710,14 +711,16 @@ def execute_poststages(
                 max_samples=max_samples,
                 resume=True,
             )
-            if result["status"] != "settled":
+            if result["status"] not in COMPLETE_BATCH_STATES:
                 manifest.update(status="blocked", blocked_batch=old["batch_id"])
                 campaign.atomic_json(path, manifest)
                 return progress_report(manifest)
     while True:
         if hash_fn() != hashes:
             raise ValueError("Source changed during post-stages; refusing further model calls.")
-        pending = [batch for batch in manifest["batches"] if batch["status"] != "settled"]
+        pending = [
+            batch for batch in manifest["batches"] if batch["status"] not in COMPLETE_BATCH_STATES
+        ]
         if pending:
             batch = pending[0]
         else:
@@ -772,6 +775,7 @@ def execute_poststages(
             "interrupted",
             "blocked",
             "settled",
+            "complete_reserved",
         }
         task = (
             None
@@ -812,7 +816,7 @@ def execute_poststages(
             log_paths=result.get("log_paths", []),
             sample_status_counts=result.get("sample_status_counts", {}),
         )
-        if result["status"] != "settled":
+        if result["status"] not in COMPLETE_BATCH_STATES:
             manifest.update(status=result["status"], blocked_batch=batch["batch_id"])
             campaign.atomic_json(path, manifest)
             return progress_report(manifest)

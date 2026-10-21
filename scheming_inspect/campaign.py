@@ -34,6 +34,12 @@ from .tasks import ROOT, scheming
 
 MODEL = "openrouter/deepseek/deepseek-v4-flash"
 MANIFEST_VERSION = 1
+COMPLETE_BATCH_STATES = {"settled", "complete_reserved"}
+
+
+def ledger_status(batch_status: str) -> str:
+    """Execution can finish while its full unknown bill remains reserved."""
+    return "closed_reserved" if batch_status == "complete_reserved" else batch_status
 
 
 class CampaignError(RuntimeError):
@@ -236,7 +242,9 @@ def execute_batch(
 ) -> dict:
     """Execute once, then reconcile; reusable by the optional post stages.
 
-    Returns ``settled``, ``blocked``, or ``pending_budget``. The last status means
+    Returns ``settled``, ``complete_reserved``, ``blocked``, or ``pending_budget``.
+    Complete-reserved work retains its full spending ceiling, not an actual bill.
+    The last status means
     no reservation/start occurred, so a caller may safely choose a smaller batch.
     Existing started/reserved batches are reconciliation-only, even on resume.
     Roles are role-to-model strings; each gets the same provider price caps.
@@ -279,8 +287,8 @@ def execute_batch(
             raise CampaignError("Ledger reservation identity differs from the batch")
         if (previous or reserved) and not resume:
             raise CampaignError("Batch already exists; use --resume to reconcile, never rerun")
-        if previous and previous["status"] == "settled":
-            if not reserved or reserved.get("status") != "settled":
+        if previous and previous["status"] in COMPLETE_BATCH_STATES:
+            if not reserved or reserved.get("status") != ledger_status(previous["status"]):
                 raise CampaignError("Settled journal and budget ledger disagree")
             _verify_settled_logs(reserved, previous.get("log_paths", []))
             return previous
@@ -394,12 +402,18 @@ def execute_batch(
         journal.update(coverage, updated_at=utc_now())
         atomic_json(journal_path, journal)
         try:
-            if reserved and reserved.get("status") == "settled":
+            if reserved and reserved.get("status") in {"settled", "closed_reserved"}:
                 # A crash after ledger settlement but before journal replacement
                 # must neither repay nor lose the completed batch.
                 if not coverage["complete"]:
                     raise CampaignError("Settled ledger has incomplete/mismatching batch logs")
                 _verify_settled_logs(reserved, coverage["log_paths"])
+                if reserved["status"] == "closed_reserved" and not reserved.get("closure", {}).get(
+                    "evidence", {}
+                ).get("completed_billing_only"):
+                    raise CampaignError(
+                        "Retained reservation is not a completed billing-only batch"
+                    )
                 settlement = reserved
             else:
                 settlement = ledger.settle(
@@ -408,13 +422,35 @@ def execute_batch(
                     complete=coverage["complete"],
                     api_key=os.getenv("OPENROUTER_API_KEY"),
                 )
+            if (
+                settlement["status"] == "blocked"
+                and getattr(ledger, "allow_unverified_billing", False)
+                and coverage["complete"]
+                and not coverage["sample_status_counts"].get("error", 0)
+            ):
+                settlement = ledger.close_completed_with_reservation(
+                    batch_id,
+                    coverage["log_paths"],
+                    evidence={
+                        "complete": coverage["complete"],
+                        "errors": coverage["errors"],
+                        "sample_status_counts": coverage["sample_status_counts"],
+                        "execution_finished": True,
+                        "provider": provider,
+                    },
+                )
         except BaseException as exc:
             journal.update(
                 status="blocked", settlement_error=type(exc).__name__, updated_at=utc_now()
             )
             atomic_json(journal_path, journal)
             raise
-        journal.update(status=settlement["status"], settlement=settlement, updated_at=utc_now())
+        status = (
+            "complete_reserved"
+            if settlement["status"] == "closed_reserved"
+            else settlement["status"]
+        )
+        journal.update(status=status, settlement=settlement, updated_at=utc_now())
         atomic_json(journal_path, journal)
         emit(
             "batch_" + journal["status"],
@@ -532,14 +568,14 @@ def refresh_base_records(manifest: dict) -> None:
     """One canonical log/sample selection per original case, including recovery."""
     records = []
     for batch in manifest["batches"]:
-        if batch.get("canonical_log_records") and batch["status"] == "settled":
+        if batch.get("canonical_log_records") and batch["status"] in COMPLETE_BATCH_STATES:
             records.extend(batch["canonical_log_records"])
         elif batch.get("recovery"):
             from .recovery import retained_record
 
             if batch["recovery"]["retained_sample_ids"]:
                 records.append(retained_record(manifest, batch))
-        elif batch["status"] == "settled":
+        elif batch["status"] in COMPLETE_BATCH_STATES:
             records.extend(
                 {
                     "path": path,
@@ -590,9 +626,9 @@ def run_base(
                 eval_fn=eval_fn,
                 read_log_fn=read_log_fn,
             )
-        elif journal and journal.get("status") == "settled":
+        elif journal and journal.get("status") in COMPLETE_BATCH_STATES:
             reservation = _ledger_batch(ledger, batch["batch_id"])
-            if reservation is None or reservation.get("status") != "settled":
+            if reservation is None or reservation.get("status") != ledger_status(journal["status"]):
                 raise CampaignError("Settled batch and ledger disagree")
             _verify_settled_logs(reservation, journal.get("log_paths", []))
             result = journal
@@ -632,7 +668,9 @@ def run_base(
                 stage="base",
                 model=config["model"],
                 provider=provider,
-                fingerprint=manifest["fingerprint"],
+                fingerprint=(journal or (reserved or {}).get("metadata", {})).get(
+                    "fingerprint", manifest["fingerprint"]
+                ),
                 expected_sample_ids=batch["sample_ids"],
                 max_samples=config["max_samples"],
                 resume=resume,
@@ -648,7 +686,7 @@ def run_base(
             batch["canonical_log_records"] = result["canonical_log_records"]
         refresh_base_records(manifest)
         manifest.update(updated_at=utc_now(), status="running", current_batch=batch["batch_id"])
-        if result["status"] != "settled":
+        if result["status"] not in COMPLETE_BATCH_STATES:
             manifest.update(status=result["status"], blocker=result)
             atomic_json(directory / "manifest.json", manifest)
             return manifest
@@ -659,7 +697,7 @@ def run_base(
             completed_samples=sum(
                 len(item["sample_ids"])
                 for item in manifest["batches"]
-                if item["status"] == "settled"
+                if item["status"] in COMPLETE_BATCH_STATES
             ),
             total_samples=manifest["total_samples"],
             budget=budget_summary(ledger.snapshot()),
@@ -720,7 +758,7 @@ def campaign_status(directory: Path) -> dict:
             completed += len(recovery["retained_sample_ids"])
             outcomes.update(recovery["retained_status_counts"])
             outcomes.update(item.get("sample_status_counts", {}))
-            if item["status"] == "settled":
+            if item["status"] in COMPLETE_BATCH_STATES:
                 completed += len(recovery["retry_sample_ids"])
             elif item["status"] in {"reserved", "started", "returned", "interrupted", "blocked"}:
                 current.append(recovery["attempt_id"])
@@ -729,7 +767,7 @@ def campaign_status(directory: Path) -> dict:
         item = read_json(path) if path.exists() else batch
         counts[item["status"]] += 1
         outcomes.update(item.get("sample_status_counts", {}))
-        if item["status"] == "settled":
+        if item["status"] in COMPLETE_BATCH_STATES:
             completed += len(batch["sample_ids"])
         elif item["status"] in {"reserved", "started", "returned", "interrupted", "blocked"}:
             current.append(batch["batch_id"])
@@ -762,6 +800,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--status", action="store_true")
+    parser.add_argument(
+        "--allow-unverified-billing",
+        action="store_true",
+        help="Continue complete bounded batches with unknown bills by retaining their full reservation",
+    )
     parser.add_argument("--budget-usd", type=float, default=50.0)
     parser.add_argument("--stage-budget-usd", type=float, default=35.0)
     parser.add_argument("--starting-spend-usd", type=float, default=0.0)
@@ -777,7 +820,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.status:
         status = campaign_status(directory)
         print(
-            f"Campaign: {status['status']}\nBase samples settled: "
+            f"Campaign: {status['status']}\nBase samples recorded: "
             f"{status['base_samples_settled']}/{status['base_samples_total']}\n"
             f"Batch states: {status['base_batches']}\nSample outcomes: {status['sample_outcomes']}"
         )
@@ -792,7 +835,7 @@ def main(argv: list[str] | None = None) -> None:
                 print("Pending billing: " + json.dumps(budget["pending_batches"]))
             if budget["closed_reserved_batches"]:
                 print(
-                    "Stopped attempts with permanently retained reservations: "
+                    "Batches with permanently retained reservations: "
                     + ", ".join(budget["closed_reserved_batches"])
                 )
         if status["current_batches"]:
@@ -837,7 +880,7 @@ def main(argv: list[str] | None = None) -> None:
     config = {
         key: value
         for key, value in vars(args).items()
-        if key not in {"execute", "resume", "status", "campaign_dir"}
+        if key not in {"execute", "resume", "status", "campaign_dir", "allow_unverified_billing"}
     }
     config.update(
         first_batch_size=1,
@@ -873,6 +916,17 @@ def main(argv: list[str] | None = None) -> None:
             limit_usd=args.budget_usd,
             starting_spend_usd=args.starting_spend_usd,
             stage_limits={"base": args.stage_budget_usd},
+            allow_unverified_billing=args.allow_unverified_billing,
+        )
+        atomic_json(
+            directory / "billing-policy.json",
+            {
+                "at": utc_now(),
+                "allow_unverified_billing": args.allow_unverified_billing,
+                "unknown_cost_policy": "retain_full_original_reservation",
+                "budget_usd": args.budget_usd,
+                "stage_budget_usd": args.stage_budget_usd,
+            },
         )
         manifest = run_base(directory, manifest, ledger, resume=args.resume)
         if manifest["status"] != "base_complete":

@@ -627,3 +627,231 @@ def test_corrupt_closed_reservation_evidence_fails_closed(tmp_path, logs):
     ledger.path.write_text(json.dumps(state))
     with pytest.raises(BudgetError, match="audit evidence"):
         CampaignLedger(ledger.path)
+
+
+@pytest.fixture
+def completed_batch(monkeypatch, tmp_path):
+    """One bounded runner batch; all reads and billing remain local fakes."""
+    provider = {
+        "require_parameters": True,
+        "max_price": {"prompt": 0.091, "completion": 0.182, "request": 0},
+    }
+    def caps():
+        return SimpleNamespace(max_retries=0, max_tokens=8000, cache_prompt=False)
+
+    log = SimpleNamespace(
+        status="success",
+        eval=SimpleNamespace(
+            model="openrouter/test/model",
+            model_args={"provider": provider},
+            model_roles=None,
+            config=SimpleNamespace(epochs=1, retry_on_error=0, token_limit=100000),
+            metadata={
+                "campaign_batch_id": "complete",
+                "campaign_fingerprint": "frozen",
+                "campaign_stage": "base",
+                "spending_reservation_usd": 3,
+            },
+        ),
+        plan=SimpleNamespace(config=caps()),
+        samples=[
+            SimpleNamespace(
+                id="sample-1",
+                epoch=1,
+                error=None,
+                invalidation=None,
+                model_usage={},
+                error_retries=None,
+                events=[event(config=caps())],
+            )
+        ],
+    )
+    path = tmp_path / "complete.eval"
+    path.write_text("immutable fake log bytes")
+    monkeypatch.setattr(budget, "read_eval_log", lambda *_args, **_kwargs: log)
+    ledger = CampaignLedger(
+        tmp_path / "ledger.json",
+        limit_usd=5,
+        starting_spend_usd=1,
+        stage_limits={"base": 3},
+        allow_unverified_billing=True,
+    )
+    ledger.reserve(
+        "complete",
+        3,
+        metadata={
+            "model": "openrouter/test/model",
+            "sample_ids": ["sample-1"],
+            "fingerprint": "frozen",
+            "model_roles": {},
+        },
+    )
+    evidence = {
+        "complete": True,
+        "errors": [],
+        "sample_status_counts": {"complete": 1},
+        "execution_finished": True,
+        "provider": provider,
+    }
+    return SimpleNamespace(ledger=ledger, log=log, path=path, evidence=evidence)
+
+
+def unavailable(_response_id):
+    raise BillingError("Eventually available billing record")
+
+
+@pytest.mark.parametrize("kind", ["unavailable", "missing-id", "failed", "pending"])
+def test_completed_unknown_billing_retains_ceiling_without_network(
+    completed_batch, monkeypatch, kind
+):
+    b = completed_batch
+    e = b.log.samples[0].events[0]
+    if kind == "missing-id":
+        e.output.response_id = None
+    elif kind == "failed":
+        e.error = "request failed"
+        e.output.response_id = None
+    elif kind == "pending":
+        e.pending = True
+    b.ledger.settle("complete", [b.path], complete=True, lookup=unavailable)
+    before = json.loads(b.ledger.path.read_text())
+    monkeypatch.setattr(budget, "fetch_generation", lambda *_a, **_k: pytest.fail("network"))
+    result = b.ledger.close_completed_with_reservation("complete", [b.path], evidence=b.evidence)
+    after = json.loads(b.ledger.path.read_text())
+    assert result["status"] == "closed_reserved"
+    assert result["actual_usd"] is None
+    assert result["committed_usd"] == 3
+    assert result["closure"]["evidence"]["completed_billing_only"] is True
+    assert result["closure"]["evidence"]["bounded_execution_confirmed"] is True
+    assert after["generations"] == before["generations"]
+    assert after["batches"]["complete"]["errors"] == before["batches"]["complete"]["errors"]
+    assert b.ledger.pending() == []
+    assert b.ledger.snapshot()["remaining_usd"] == 1
+    with pytest.raises(BudgetExceeded, match="stage"):
+        b.ledger.reserve("base-more", 0.01)
+    with pytest.raises(BudgetExceeded, match="lifetime"):
+        b.ledger.reserve("too-much", 1.01, stage="audit")
+    b.ledger.reserve("next", 1, stage="audit")
+
+
+def test_completed_closure_requires_explicit_runtime_policy_without_widening_ledger(
+    completed_batch,
+):
+    b = completed_batch
+    b.ledger.settle("complete", [b.path], complete=True, lookup=unavailable)
+    before = b.ledger.path.read_bytes()
+    strict = CampaignLedger(
+        b.ledger.path, limit_usd=5, starting_spend_usd=1, stage_limits={"base": 3}
+    )
+    with pytest.raises(BudgetError, match="opt-in"):
+        strict.close_completed_with_reservation("complete", [b.path], evidence=b.evidence)
+    assert b.ledger.path.read_bytes() == before
+    assert strict.pending()[0]["status"] == "blocked"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("complete", False),
+        ("complete", 1),
+        ("execution_finished", False),
+        ("errors", ["missing coverage"]),
+        ("sample_status_counts", {"error": 1}),
+        ("sample_status_counts", {"complete": 2}),
+    ],
+)
+def test_completed_closure_rejects_incomplete_or_failed_coverage(completed_batch, field, value):
+    b = completed_batch
+    b.ledger.settle("complete", [b.path], complete=True, lookup=unavailable)
+    b.evidence[field] = value
+    with pytest.raises(BudgetError):
+        b.ledger.close_completed_with_reservation("complete", [b.path], evidence=b.evidence)
+    assert b.ledger.pending()[0]["status"] == "blocked"
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "sample-error",
+        "invalidation",
+        "cancelled",
+        "wrong-id",
+        "wrong-batch",
+        "wrong-bound",
+        "model-retry",
+        "sample-retry",
+        "configured-retry",
+        "no-token-limit",
+        "no-max-tokens",
+        "event-over-cap",
+        "cache-enabled",
+        "provider-uncapped",
+        "provider-fee",
+        "wrong-role",
+    ],
+)
+def test_completed_closure_checks_logs_instead_of_trusting_attestations(completed_batch, damage):
+    b = completed_batch
+    log, sample = b.log, b.log.samples[0]
+    if damage == "sample-error":
+        sample.error = "failed"
+    elif damage == "invalidation":
+        sample.invalidation = "invalid"
+    elif damage == "cancelled":
+        log.status = "cancelled"
+    elif damage == "wrong-id":
+        sample.id = "unreserved"
+    elif damage == "wrong-batch":
+        log.eval.metadata["campaign_batch_id"] = "other"
+    elif damage == "wrong-bound":
+        log.eval.metadata["spending_reservation_usd"] = 2
+    elif damage == "model-retry":
+        sample.events[0].retries = 1
+    elif damage == "sample-retry":
+        sample.error_retries = ["prior attempt"]
+    elif damage == "configured-retry":
+        sample.events[0].config.max_retries = 1
+    elif damage == "no-token-limit":
+        log.eval.config.token_limit = None
+    elif damage == "no-max-tokens":
+        log.plan.config.max_tokens = None
+    elif damage == "event-over-cap":
+        sample.events[0].config.max_tokens = 8001
+    elif damage == "cache-enabled":
+        sample.events[0].config.cache_prompt = True
+    elif damage == "provider-uncapped":
+        log.eval.model_args = {"provider": {}}
+    elif damage == "provider-fee":
+        b.evidence["provider"]["max_price"]["request"] = 1
+    elif damage == "wrong-role":
+        log.eval.model_roles = {"grader": SimpleNamespace()}
+    b.ledger.settle("complete", [b.path], complete=True, lookup=unavailable)
+    before = b.ledger.path.read_bytes()
+    with pytest.raises(BudgetError):
+        b.ledger.close_completed_with_reservation("complete", [b.path], evidence=b.evidence)
+    assert b.ledger.path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"id": "gen-other", "total_cost": 0.1},
+        {"id": "gen-paid", "total_cost": -1},
+        {"id": "gen-paid", "total_cost": "0.1"},
+        {"id": "gen-paid", "total_cost": True},
+        {"id": "gen-paid", "total_cost": 4},
+    ],
+)
+def test_completed_closure_rejects_billing_integrity_or_overrun(completed_batch, data):
+    b = completed_batch
+    b.ledger.settle("complete", [b.path], complete=True, lookup=lambda _: data)
+    with pytest.raises(BudgetError):
+        b.ledger.close_completed_with_reservation("complete", [b.path], evidence=b.evidence)
+    assert b.ledger.pending()[0]["status"] == "blocked"
+
+
+def test_completed_closure_cannot_hide_coverage_failure_in_ledger(completed_batch):
+    b = completed_batch
+    b.ledger.settle("complete", [b.path], complete=False, lookup=unavailable)
+    with pytest.raises(BudgetError, match="unavailable billing"):
+        b.ledger.close_completed_with_reservation("complete", [b.path], evidence=b.evidence)

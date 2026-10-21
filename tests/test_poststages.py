@@ -266,20 +266,27 @@ def test_budget_adapts_all_stages_without_splitting_interrogation_pairs(tmp_path
     assert 0 < sum(item["stop"] - item["start"] for item in selected) < 32
 
 
-def test_full_offline_execution_has_no_limit_one_and_resumes_without_dispatch(tmp_path):
+@pytest.mark.parametrize("completed_status", ["settled", "complete_reserved"])
+def test_full_offline_execution_has_no_limit_one_and_resumes_without_dispatch(
+    tmp_path, completed_status
+):
     _, _, read = setup_base(tmp_path)
     calls = []
 
     def execute(task, **kwargs):
         if task is None:
-            return {"status": "settled"}
+            return {"status": completed_status}
         ids = [str(sample.id) for sample in task.dataset]
         assert ids == kwargs["expected_sample_ids"]
         assert len(ids) <= 32
         assert kwargs["provider"] == RATES["provider"]
         assert all(value == MODEL for value in kwargs["model_roles"].values())
         calls.append((kwargs["stage"], ids))
-        return {"status": "settled", "log_paths": [], "sample_status_counts": {"valid": len(ids)}}
+        return {
+            "status": completed_status,
+            "log_paths": [],
+            "sample_status_counts": {"valid": len(ids)},
+        }
 
     result = run(tmp_path, read, execute=execute)
     assert result["status"] == "complete"

@@ -17,4 +17,5 @@ exec uv run --locked python scripts/run_campaign_with_billing_retry.py \
   --batch-size 32 \
   --seed 42 \
   --poststages all \
+  --allow-unverified-billing \
   --execute "$@"

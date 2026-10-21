@@ -300,14 +300,16 @@ def run_recovery_batch(
         stage="base",
         model=config["model"],
         provider=provider,
-        fingerprint=manifest["fingerprint"],
+        fingerprint=(journal or (reserved or {}).get("metadata", {})).get(
+            "fingerprint", manifest["fingerprint"]
+        ),
         expected_sample_ids=retry,
         max_samples=config["max_samples"],
         resume=resume,
         eval_fn=eval_fn,
         read_log_fn=read_log_fn,
     )
-    if result["status"] != "settled":
+    if result["status"] not in c.COMPLETE_BATCH_STATES:
         return result
     counts = Counter(spec["retained_status_counts"])
     counts.update(result["sample_status_counts"])
@@ -325,7 +327,7 @@ def run_recovery_batch(
         for path in result["log_paths"]
     )
     return {
-        "status": "settled",
+        "status": result["status"],
         "sample_status_counts": dict(counts),
         "log_paths": [record["path"] for record in canonical],
         "canonical_log_records": canonical,
