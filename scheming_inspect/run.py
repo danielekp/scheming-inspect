@@ -43,7 +43,6 @@ def openrouter_bound(model: str, samples: int, token_limit: int, max_tokens: int
         context = int(entry["context_length"])
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
         raise ValueError("Unusable model pricing/context metadata.") from exc
-    # Cache reads can lower cost; explicit cache writes are disabled below.
     token_prices = {"prompt", "completion", "input_cache_read", "input_cache_write"}
     if any(rate != 0 for name, rate in rates.items() if name not in token_prices):
         raise ValueError("This model has pricing components unsupported by the spending bound.")
@@ -51,9 +50,6 @@ def openrouter_bound(model: str, samples: int, token_limit: int, max_tokens: int
     if context < 1:
         raise ValueError("Unusable model pricing/context metadata.")
     upper = samples * (token_limit + context + max_tokens) * price
-    # OpenRouter max_price token rates are USD per million tokens, whereas the
-    # catalog's rates above are USD per token. Request fees use USD per request.
-    # https://openrouter.ai/docs/guides/routing/provider-selection#max-price
     provider = {
         "max_price": {
             "prompt": prompt * 1_000_000,
