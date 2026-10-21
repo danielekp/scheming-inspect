@@ -33,6 +33,8 @@ The `smoke` profile has eight samples, including both branches of the two paired
 
 ## The code to read
 
+For the authorized full matrix and its follow-up stages, use the resumable campaign described in [Full campaign](docs/FULL_RUN.md). It reconciles spending between batches and shares one $50 cap across stages. The simpler `run` module above keeps its original whole-run reservation policy.
+
 | File | Responsibility |
 |---|---|
 | `scheming_inspect/data.py` | Builds cases, paired conditions, prompts and sandbox files. |
