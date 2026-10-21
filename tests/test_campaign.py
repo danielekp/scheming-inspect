@@ -198,6 +198,36 @@ def test_settled_resume_never_dispatches_or_bills_twice(tmp_path, billing):
         execute(tmp_path, ledger, lambda *_a, **_k: pytest.fail("redispatch"))
 
 
+def test_billing_only_resume_releases_reservation_without_regenerating(tmp_path, monkeypatch):
+    ledger = CampaignLedger(tmp_path / "ledger.json")
+    lookups = []
+
+    def delayed_bill(response_id, **kwargs):
+        lookups.append(response_id)
+        if len(lookups) == 1:
+            raise budget.BillingError("Temporary billing lookup failure")
+        return {"id": response_id, "total_cost": 0.01}
+
+    monkeypatch.setattr(budget, "fetch_generation", delayed_bill)
+    blocked = execute(tmp_path, ledger, lambda task, **kwargs: [create_log(task, kwargs)])
+    assert blocked["status"] == "blocked"
+    assert blocked["complete"] is True
+    assert ledger.snapshot()["committed_usd"] == 1
+    assert blocked["settlement"]["errors"] == [
+        "Billing unavailable for gen-oversight-0001 (BillingError)."
+    ]
+
+    settled = execute(
+        tmp_path,
+        ledger,
+        lambda *_a, **_k: pytest.fail("A billing retry regenerated a completed sample"),
+        resume=True,
+    )
+    assert settled["status"] == "settled"
+    assert ledger.snapshot()["committed_usd"] == pytest.approx(0.01)
+    assert lookups == ["gen-oversight-0001", "gen-oversight-0001"]
+
+
 def test_partial_batch_blocks_and_resume_does_not_pay_for_missing_samples(tmp_path, billing):
     ledger = CampaignLedger(tmp_path / "ledger.json")
     args = dict(
