@@ -1,0 +1,492 @@
+{
+  "source": "https://openrouter.ai/api/v1/generation",
+  "unique_generations": 48,
+  "verified_generations": 48,
+  "missing_event_ids": 0,
+  "verified_total_usd": 0.013229117,
+  "errors": [],
+  "generations": [
+    {
+      "id": "gen-1792572630-Bs3ll6jJwWdsPiy3l8nd",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Parasail",
+      "total_cost": 0.00010248,
+      "native_tokens_prompt": 606,
+      "native_tokens_completion": 63,
+      "native_tokens_cached": 0,
+      "native_tokens_reasoning": 22
+    },
+    {
+      "id": "gen-1792572633-0vlSk7Kzxxk6pdyrCo8k",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Parasail",
+      "total_cost": 0.0002044,
+      "native_tokens_prompt": 806,
+      "native_tokens_completion": 455,
+      "native_tokens_cached": 512,
+      "native_tokens_reasoning": 510
+    },
+    {
+      "id": "gen-1792572640-LZYGl3GHuvmlrrexaGid",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Parasail",
+      "total_cost": 0.0002611,
+      "native_tokens_prompt": 1287,
+      "native_tokens_completion": 545,
+      "native_tokens_cached": 1024,
+      "native_tokens_reasoning": 378
+    },
+    {
+      "id": "gen-1792572651-SOCRdWKNlWh3sHlpgKFs",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Parasail",
+      "total_cost": 0.00027678,
+      "native_tokens_prompt": 1857,
+      "native_tokens_completion": 380,
+      "native_tokens_cached": 1280,
+      "native_tokens_reasoning": 387
+    },
+    {
+      "id": "gen-1792572658-tFdkvMGNBqSBSIZx6x3p",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Parasail",
+      "total_cost": 0.00023296,
+      "native_tokens_prompt": 2384,
+      "native_tokens_completion": 152,
+      "native_tokens_cached": 2048,
+      "native_tokens_reasoning": 103
+    },
+    {
+      "id": "gen-1792572663-u7bQ2i6eFJMsObk5DJRU",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Parasail",
+      "total_cost": 0.0002128,
+      "native_tokens_prompt": 2552,
+      "native_tokens_completion": 60,
+      "native_tokens_cached": 2304,
+      "native_tokens_reasoning": 8
+    },
+    {
+      "id": "gen-1792572666-GbDFNqXahqDse62CD3sg",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Parasail",
+      "total_cost": 0.00024654,
+      "native_tokens_prompt": 2627,
+      "native_tokens_completion": 207,
+      "native_tokens_cached": 2560,
+      "native_tokens_reasoning": 28
+    },
+    {
+      "id": "gen-1792572690-upvS974wIrvpRAZuJwfA",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "GMICloud",
+      "total_cost": 7.5075e-05,
+      "native_tokens_prompt": 685,
+      "native_tokens_completion": 70,
+      "native_tokens_cached": 0,
+      "native_tokens_reasoning": 7
+    },
+    {
+      "id": "gen-1792572694-FbvL15IPMiFFKagObmrL",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "GMICloud",
+      "total_cost": 0.000178633,
+      "native_tokens_prompt": 1139,
+      "native_tokens_completion": 790,
+      "native_tokens_cached": 945,
+      "native_tokens_reasoning": 566
+    },
+    {
+      "id": "gen-1792572703-qPxs8gZqgYtBvIuQX3tV",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "GMICloud",
+      "total_cost": 9.8826e-05,
+      "native_tokens_prompt": 1944,
+      "native_tokens_completion": 263,
+      "native_tokens_cached": 1730,
+      "native_tokens_reasoning": 16
+    },
+    {
+      "id": "gen-1792572727-tlVoxtwnYXlhNIzyQAx5",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "GMICloud",
+      "total_cost": 3.2268e-05,
+      "native_tokens_prompt": 689,
+      "native_tokens_completion": 78,
+      "native_tokens_cached": 613,
+      "native_tokens_reasoning": 12
+    },
+    {
+      "id": "gen-1792572731-Oe0fP4H8X10zhhpQcBvj",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "GMICloud",
+      "total_cost": 4.4426e-05,
+      "native_tokens_prompt": 1085,
+      "native_tokens_completion": 92,
+      "native_tokens_cached": 976,
+      "native_tokens_reasoning": 10
+    },
+    {
+      "id": "gen-1792572734-yzw9pvSfBLpqPTLPQmaN",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "GMICloud",
+      "total_cost": 0.00040009,
+      "native_tokens_prompt": 1367,
+      "native_tokens_completion": 1952,
+      "native_tokens_cached": 1093,
+      "native_tokens_reasoning": 1766
+    },
+    {
+      "id": "gen-1792572753-4k9pfY79rAieaRLWL2OW",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "GMICloud",
+      "total_cost": 0.000158522,
+      "native_tokens_prompt": 3334,
+      "native_tokens_completion": 324,
+      "native_tokens_cached": 2800,
+      "native_tokens_reasoning": 15
+    },
+    {
+      "id": "gen-1792572780-5EcjFepM74fs87CcsPVK",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Relace",
+      "total_cost": 0.0001061,
+      "native_tokens_prompt": 709,
+      "native_tokens_completion": 157,
+      "native_tokens_cached": 0,
+      "native_tokens_reasoning": 22
+    },
+    {
+      "id": "gen-1792572784-aC7kDblta6vzQtcomwLN",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Relace",
+      "total_cost": 9.795e-05,
+      "native_tokens_prompt": 1356,
+      "native_tokens_completion": 67,
+      "native_tokens_cached": 512,
+      "native_tokens_reasoning": 18
+    },
+    {
+      "id": "gen-1792572786-97b7kw0P8L6QzaymRLFU",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Relace",
+      "total_cost": 0.0001082,
+      "native_tokens_prompt": 1597,
+      "native_tokens_completion": 63,
+      "native_tokens_cached": 1280,
+      "native_tokens_reasoning": 11
+    },
+    {
+      "id": "gen-1792572788-bGqSGLuqd4uLQFL90aZM",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Relace",
+      "total_cost": 0.00086315,
+      "native_tokens_prompt": 3718,
+      "native_tokens_completion": 1505,
+      "native_tokens_cached": 1536,
+      "native_tokens_reasoning": 791
+    },
+    {
+      "id": "gen-1792572795-YqeFDKElIdPZgihXAvNX",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Relace",
+      "total_cost": 0.00029345,
+      "native_tokens_prompt": 5239,
+      "native_tokens_completion": 70,
+      "native_tokens_cached": 3584,
+      "native_tokens_reasoning": 7
+    },
+    {
+      "id": "gen-1792572798-vP38BN2Pmsg3gzOEUZnG",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Relace",
+      "total_cost": 0.00052625,
+      "native_tokens_prompt": 5485,
+      "native_tokens_completion": 560,
+      "native_tokens_cached": 5120,
+      "native_tokens_reasoning": 231
+    },
+    {
+      "id": "gen-1792572801-hrVTcsYB0YsbEBMxLUKK",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Relace",
+      "total_cost": 0.00101415,
+      "native_tokens_prompt": 6243,
+      "native_tokens_completion": 1560,
+      "native_tokens_cached": 5888,
+      "native_tokens_reasoning": 1647
+    },
+    {
+      "id": "gen-1792572810-tuTq5NLlVUPQmtzQzCLs",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Relace",
+      "total_cost": 0.0009081,
+      "native_tokens_prompt": 8001,
+      "native_tokens_completion": 1129,
+      "native_tokens_cached": 6144,
+      "native_tokens_reasoning": 1151
+    },
+    {
+      "id": "gen-1792572816-kNSApb0Ojnzgr1PBT9L3",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Relace",
+      "total_cost": 0.0008992,
+      "native_tokens_prompt": 9146,
+      "native_tokens_completion": 982,
+      "native_tokens_cached": 7936,
+      "native_tokens_reasoning": 409
+    },
+    {
+      "id": "gen-1792572838-KPVKxIJgGY7RL07hGwJA",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Parasail",
+      "total_cost": 8.974e-05,
+      "native_tokens_prompt": 501,
+      "native_tokens_completion": 70,
+      "native_tokens_cached": 0,
+      "native_tokens_reasoning": 27
+    },
+    {
+      "id": "gen-1792572838-tAGPWWJYDe6aZYyOcgrK",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Relace",
+      "total_cost": 0.00154375,
+      "native_tokens_prompt": 4712,
+      "native_tokens_completion": 2907,
+      "native_tokens_cached": 0,
+      "native_tokens_reasoning": 3380
+    },
+    {
+      "id": "gen-1792572841-O1iYrJK1aig2pWVMyZpI",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Parasail",
+      "total_cost": 0.00011088,
+      "native_tokens_prompt": 672,
+      "native_tokens_completion": 188,
+      "native_tokens_cached": 512,
+      "native_tokens_reasoning": 108
+    },
+    {
+      "id": "gen-1792572841-ZBudBgGp0yKnwY3pWf3z",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "DigitalOcean",
+      "total_cost": 0.000142394,
+      "native_tokens_prompt": 1285,
+      "native_tokens_completion": 84,
+      "native_tokens_cached": 0,
+      "native_tokens_reasoning": 0
+    },
+    {
+      "id": "gen-1792572844-p6jW3hJE0N22tlPaMmtN",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "DigitalOcean",
+      "total_cost": 3.136e-05,
+      "native_tokens_prompt": 272,
+      "native_tokens_completion": 24,
+      "native_tokens_cached": 0,
+      "native_tokens_reasoning": 0
+    },
+    {
+      "id": "gen-1792572846-7C97h3HMHFABrdoHdxEO",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Parasail",
+      "total_cost": 0.00024766,
+      "native_tokens_prompt": 1291,
+      "native_tokens_completion": 239,
+      "native_tokens_cached": 0,
+      "native_tokens_reasoning": 135
+    },
+    {
+      "id": "gen-1792572852-nVV3zm5YGlo7SOYuPkoK",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Parasail",
+      "total_cost": 7.616e-05,
+      "native_tokens_prompt": 324,
+      "native_tokens_completion": 110,
+      "native_tokens_cached": 0,
+      "native_tokens_reasoning": 107
+    },
+    {
+      "id": "gen-1792572856-neuQqkaGLZcHMSKI0uio",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "StreamLake",
+      "total_cost": 0.00014042,
+      "native_tokens_prompt": 1288,
+      "native_tokens_completion": 206,
+      "native_tokens_cached": 0,
+      "native_tokens_reasoning": 75
+    },
+    {
+      "id": "gen-1792572863-ilVO8AND5o2jVBn41S6z",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Relace",
+      "total_cost": 5.555e-05,
+      "native_tokens_prompt": 580,
+      "native_tokens_completion": 59,
+      "native_tokens_cached": 0,
+      "native_tokens_reasoning": 16
+    },
+    {
+      "id": "gen-1792572864-1nW71nQZAPsgbzEBHyIY",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Relace",
+      "total_cost": 0.0003468,
+      "native_tokens_prompt": 753,
+      "native_tokens_completion": 687,
+      "native_tokens_cached": 512,
+      "native_tokens_reasoning": 760
+    },
+    {
+      "id": "gen-1792572864-zzvraczZxtOChvzeCaJf",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "StreamLake",
+      "total_cost": 4.8981e-05,
+      "native_tokens_prompt": 325,
+      "native_tokens_completion": 134,
+      "native_tokens_cached": 0,
+      "native_tokens_reasoning": 94
+    },
+    {
+      "id": "gen-1792572870-MPgk5ocShwQcegTBl9BG",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Relace",
+      "total_cost": 0.00015775,
+      "native_tokens_prompt": 1373,
+      "native_tokens_completion": 198,
+      "native_tokens_cached": 0,
+      "native_tokens_reasoning": 111
+    },
+    {
+      "id": "gen-1792572872-fLMLYx4z4IwN8wRaiVyB",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Relace",
+      "total_cost": 0.00014015,
+      "native_tokens_prompt": 382,
+      "native_tokens_completion": 269,
+      "native_tokens_cached": 0,
+      "native_tokens_reasoning": 289
+    },
+    {
+      "id": "gen-1792572875-VVeAOoE8sakjVyOSKmYW",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "GMICloud",
+      "total_cost": 0.000272636,
+      "native_tokens_prompt": 1370,
+      "native_tokens_completion": 813,
+      "native_tokens_cached": 0,
+      "native_tokens_reasoning": 528
+    },
+    {
+      "id": "gen-1792572883-1g2GHw6vNo4iipLiMyDj",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "GMICloud",
+      "total_cost": 8.0171e-05,
+      "native_tokens_prompt": 569,
+      "native_tokens_completion": 156,
+      "native_tokens_cached": 0,
+      "native_tokens_reasoning": 138
+    },
+    {
+      "id": "gen-1792572887-sFVQ8tNHrxXmIt9pM4ir",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "GMICloud",
+      "total_cost": 0.000150222,
+      "native_tokens_prompt": 1376,
+      "native_tokens_completion": 627,
+      "native_tokens_cached": 1224,
+      "native_tokens_reasoning": 294
+    },
+    {
+      "id": "gen-1792572887-wPPrP6WSn1EUDC0WQHH0",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Relace",
+      "total_cost": 7.615e-05,
+      "native_tokens_prompt": 605,
+      "native_tokens_completion": 102,
+      "native_tokens_cached": 0,
+      "native_tokens_reasoning": 24
+    },
+    {
+      "id": "gen-1792572890-XUnjmL3x6jGAAjm39ZQp",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Relace",
+      "total_cost": 0.00074455,
+      "native_tokens_prompt": 1184,
+      "native_tokens_completion": 1523,
+      "native_tokens_cached": 512,
+      "native_tokens_reasoning": 863
+    },
+    {
+      "id": "gen-1792572894-5QweFtxkTwC26wGJrTUo",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "GMICloud",
+      "total_cost": 5.9841e-05,
+      "native_tokens_prompt": 628,
+      "native_tokens_completion": 218,
+      "native_tokens_cached": 508,
+      "native_tokens_reasoning": 198
+    },
+    {
+      "id": "gen-1792572898-Xc6qMdnI5PnwYYyCUWfv",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Relace",
+      "total_cost": 0.00022525,
+      "native_tokens_prompt": 1373,
+      "native_tokens_completion": 348,
+      "native_tokens_cached": 1280,
+      "native_tokens_reasoning": 168
+    },
+    {
+      "id": "gen-1792572901-ApE2Sl9iH1jp5eO9bHs4",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Relace",
+      "total_cost": 0.0002839,
+      "native_tokens_prompt": 503,
+      "native_tokens_completion": 575,
+      "native_tokens_cached": 256,
+      "native_tokens_reasoning": 650
+    },
+    {
+      "id": "gen-1792572905-7tkB1daSYNToMmJUiPIo",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Relace",
+      "total_cost": 0.0002071,
+      "native_tokens_prompt": 1379,
+      "native_tokens_completion": 307,
+      "native_tokens_cached": 1280,
+      "native_tokens_reasoning": 194
+    },
+    {
+      "id": "gen-1792572909-82idzkKuWdHPDOrUAirs",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Relace",
+      "total_cost": 0.0002001,
+      "native_tokens_prompt": 438,
+      "native_tokens_completion": 396,
+      "native_tokens_cached": 256,
+      "native_tokens_reasoning": 450
+    },
+    {
+      "id": "gen-1792572917-vGRflI4BCT8ONmkavmBk",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Venice",
+      "total_cost": 6.8422e-05,
+      "native_tokens_prompt": 517,
+      "native_tokens_completion": 96,
+      "native_tokens_cached": 0,
+      "native_tokens_reasoning": 16
+    },
+    {
+      "id": "gen-1792572923-b4j5IfGpOadQTvUANv84",
+      "model": "deepseek/deepseek-v4-flash-20260423",
+      "provider_name": "Venice",
+      "total_cost": 0.00038773,
+      "native_tokens_prompt": 1090,
+      "native_tokens_completion": 1672,
+      "native_tokens_cached": 512,
+      "native_tokens_reasoning": 746
+    }
+  ],
+  "scope": "Only requests found in supplied logs; duplicated source events counted once.",
+  "cached_events_excluded": 0
+}

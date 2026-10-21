@@ -1,0 +1,15 @@
+services:
+  default:
+    build: .
+    command: sleep infinity
+    network_mode: none
+    cap_drop: [ALL]
+    # Snap Docker on the validation host rejects exec with no-new-privileges.
+    # Keep the root filesystem read-only and permit writes only in private tmpfs.
+    read_only: true
+    tmpfs:
+      - /workspace:uid=1000,gid=1000,mode=0700,size=134217728
+      - /tmp:uid=1000,gid=1000,mode=0700,size=67108864
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
