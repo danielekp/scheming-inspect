@@ -2,8 +2,9 @@
 
 All eligible main sources are included: no default one-source limit. Descriptors
 are frozen before generation; histories are loaded one log at a time and copied
-only for the current batch. Completed and started batches never regenerate on
-resume. Cost reporting is informational and never controls execution.
+only for the current batch. Resume preserves completed batches and archives an
+incomplete attempt before rerunning its entire batch. Cost reporting is
+informational and never controls execution.
 """
 
 from __future__ import annotations
@@ -722,6 +723,24 @@ def execute_poststages(
         log_dir = root / "poststages" / stage / batch["batch_id"]
         journal_path = log_dir / "batch.json"
         journal = json.loads(journal_path.read_text()) if journal_path.exists() else {}
+        if resume and journal.get("status") not in COMPLETE_BATCH_STATES:
+            restart = campaign.reset_incomplete_batch(
+                log_dir,
+                archive_root=root.parent / (root.name + "-superseded"),
+                expected_sample_ids=batch["sample_ids"],
+                model=model,
+                batch_id=batch["batch_id"],
+                batch_fingerprint=manifest["fingerprint"],
+                read_log_fn=read_log_fn,
+            )
+            if restart:
+                batch.setdefault("restarts", []).append(restart)
+                batch.update(status="planned", log_paths=[], sample_status_counts={})
+                batch.pop("error_type", None)
+                manifest.update(status="running")
+                manifest.pop("blocked_batch", None)
+                campaign.atomic_json(path, manifest)
+                journal = json.loads(journal_path.read_text()) if journal_path.exists() else {}
         already_started = bool(journal and journal.get("status") != "planned") or bool(
             list(log_dir.glob("*.eval"))
         )

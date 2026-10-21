@@ -1,7 +1,7 @@
 """Run the reconstruction in resumable batches, without spending limits.
 
-Billing is optional reporting only. Completed or interrupted batches are never
-automatically regenerated; resumes inspect their saved results first.
+Billing is optional reporting only. Resume preserves completed batches and
+archives and reruns an interrupted batch in full when its coverage is incomplete.
 """
 
 from __future__ import annotations
@@ -145,7 +145,7 @@ def inspect_batch_logs(
         if log.status not in {"success", "error", "cancelled"}:
             errors.append(f"Nonterminal log status: {log.status}")
         if str(log.eval.model) != model:
-            errors.append("Log model does not match the reserved model")
+            errors.append("Log model does not match the batch model")
         metadata = getattr(log.eval, "metadata", None) or {}
         if metadata.get("campaign_batch_id") != batch_id:
             errors.append("Log batch ID does not match its journal")
@@ -177,7 +177,7 @@ def inspect_batch_logs(
             )
     expected = Counter(expected_sample_ids)
     if seen != expected:
-        errors.append("Sample IDs/counts do not exactly match the reserved batch")
+        errors.append("Sample IDs/counts do not exactly match the batch")
     return {
         "complete": not errors,
         "errors": errors,
@@ -206,6 +206,85 @@ def _verify_settled_logs(record: dict, paths: list[str]) -> None:
         path = Path(raw)
         if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != recorded[raw]:
             raise CampaignError("A completed batch log was removed or changed")
+
+
+def reset_incomplete_batch(
+    log_dir: Path,
+    *,
+    archive_root: Path,
+    expected_sample_ids: list[str],
+    model: str,
+    batch_id: str,
+    batch_fingerprint: str,
+    read_log_fn=None,
+) -> dict | None:
+    """Archive an incomplete attempt before rerunning its entire frozen batch.
+
+    The caller holds the campaign lock. Full terminal coverage is retained even
+    when the journal is stale or some recorded outcomes are invalid or errors.
+    """
+    log_dir = Path(log_dir).resolve()
+    path = log_dir / "batch.json"
+    if not path.exists():
+        if list(log_dir.glob("*.eval")):
+            raise CampaignError("Unjournaled evaluation logs cannot be automatically replaced")
+        return None
+    with exclusive_lock(log_dir / ".batch.lock"):
+        journal = read_json(path)
+        expected = dict(
+            batch_id=batch_id,
+            model=model,
+            fingerprint=batch_fingerprint,
+            sample_ids=expected_sample_ids,
+        )
+        if any(journal.get(k) != v for k, v in expected.items()):
+            raise CampaignError("Incomplete batch identity differs from its frozen configuration")
+        if journal["status"] in COMPLETE_BATCH_STATES or journal["status"] == "planned":
+            return None
+        reader = read_log_fn or _read_log
+        paths = sorted(log_dir.glob("*.eval"))
+        if len(paths) > 1:
+            raise CampaignError("Multiple attempt logs require explicit inspection")
+        for raw in paths:
+            log = reader(raw)
+            metadata = getattr(log.eval, "metadata", None) or {}
+            ids = [str(sample.id) for sample in log.samples or []]
+            if (
+                str(log.eval.model) != model
+                or metadata.get("campaign_batch_id") != batch_id
+                or metadata.get("campaign_fingerprint") != batch_fingerprint
+                or len(ids) != len(set(ids))
+                or not set(ids) <= set(expected_sample_ids)
+                or any(sample.epoch != 1 for sample in log.samples or [])
+            ):
+                raise CampaignError("Incomplete log identity differs from its frozen batch")
+        coverage = inspect_batch_logs(
+            log_dir,
+            expected_sample_ids=expected_sample_ids,
+            model=model,
+            batch_id=batch_id,
+            batch_fingerprint=batch_fingerprint,
+            read_log_fn=reader,
+        )
+        if coverage["complete"]:
+            return None
+        archive_root = Path(archive_root).resolve()
+        archive_root.mkdir(parents=True, exist_ok=True)
+        archive = archive_root / f"{batch_id}-{uuid4().hex}"
+        audit = {
+            "at": utc_now(),
+            "batch_id": batch_id,
+            "archive_dir": str(archive),
+            "sample_ids": list(expected_sample_ids),
+            "discarded_sample_status_counts": coverage["sample_status_counts"],
+            "reason": "Rerun the entire interrupted batch; old results excluded from analysis",
+            "coverage_errors": coverage["errors"],
+        }
+        atomic_json(log_dir / "restart-record.json", audit)
+        # Same-filesystem rename preserves every old byte before any new model call.
+        log_dir.rename(archive)
+        emit("batch_reset", **audit)
+        return audit
 
 
 def execute_batch(
@@ -508,6 +587,27 @@ def run_base(
             journal = read_json(path) if path.exists() else None
             if was_complete and (journal is None or journal["status"] not in COMPLETE_BATCH_STATES):
                 raise CampaignError("Completed batch is missing its completed execution journal")
+            if resume and not was_complete:
+                restart = reset_incomplete_batch(
+                    log_dir,
+                    archive_root=directory.parent / (directory.name + "-superseded"),
+                    expected_sample_ids=batch["sample_ids"],
+                    model=config["model"],
+                    batch_id=batch["batch_id"],
+                    batch_fingerprint=(journal or {}).get("fingerprint", manifest["fingerprint"]),
+                    read_log_fn=read_log_fn,
+                )
+                if restart:
+                    batch.setdefault("restarts", []).append(restart)
+                    batch.update(status="planned", log_paths=[], sample_status_counts={})
+                    batch.pop("canonical_log_records", None)
+                    manifest.pop("blocker", None)
+                    manifest.update(
+                        status="running", current_batch=batch["batch_id"], updated_at=utc_now()
+                    )
+                    refresh_base_records(manifest)
+                    atomic_json(directory / "manifest.json", manifest)
+                    journal = None
             task = None
             if journal is None or journal["status"] == "planned":
                 task = sliced_task(

@@ -279,3 +279,101 @@ def test_missing_completed_journal_never_regenerates(tmp_path, monkeypatch):
             eval_fn=lambda *_a, **_k: pytest.fail("Rerun"),
             source_hash_fn=lambda: {},
         )
+
+
+def test_resume_reruns_whole_interrupted_batch_and_archives_partial_results(tmp_path, monkeypatch):
+    root = tmp_path / "campaign"
+    cfg = config()
+    manifest = campaign.prepare_manifest(
+        root,
+        config=cfg,
+        cells=[{"experiment": "oversight", "n": 2}],
+        hashes={},
+        resume=False,
+        task_factory=task_factory,
+    )
+    batch = manifest["batches"][0]
+    batch.update(stop=2, sample_ids=["oversight-0001", "oversight-0002"])
+    manifest["batches"] = [batch]
+
+    def interrupted(task, **kw):
+        log = create_log(task, kw, missing=("oversight-0002",), status="started")
+        log.samples[0].metadata["behavior"]["schema_valid"] = 0
+        write_eval_log(log, Path(kw["log_dir"]) / "result.eval")
+
+    monkeypatch.setattr(campaign, "report_cost", lambda _: {"status": "unavailable"})
+    out = campaign.run_base(
+        root,
+        manifest,
+        resume=False,
+        task_factory=task_factory,
+        eval_fn=interrupted,
+        source_hash_fn=lambda: {},
+    )
+    assert out["status"] == "blocked"
+    old_dir = root / "base" / batch["batch_id"]
+    old_bytes = (old_dir / "result.eval").read_bytes()
+    attempts = []
+
+    def rerun(task, **kw):
+        attempts.append([sample.id for sample in task.dataset])
+        return create_log(task, kw)
+
+    out = campaign.run_base(
+        root,
+        manifest,
+        resume=True,
+        task_factory=task_factory,
+        eval_fn=rerun,
+        source_hash_fn=lambda: {},
+    )
+    assert out["status"] == "base_complete"
+    assert attempts == [["oversight-0001", "oversight-0002"]]
+    audit = batch["restarts"][0]
+    assert audit["discarded_sample_status_counts"] == {"invalid_schema": 1}
+    archive = Path(audit["archive_dir"])
+    assert not archive.is_relative_to(root)
+    assert (archive / "result.eval").read_bytes() == old_bytes
+    assert len(out["completed_base_log_records"]) == 1
+    assert out["completed_base_log_records"][0]["path"] == str(old_dir / "result.eval")
+    assert campaign.campaign_status(root)["base_samples_settled"] == 2
+
+
+def test_stale_journal_with_complete_log_is_never_reset(tmp_path):
+    result = execute(tmp_path, lambda task, **kw: create_log(task, kw, errors=("oversight-0001",)))
+    result["status"] = "interrupted"
+    campaign.atomic_json(tmp_path / "one" / "batch.json", result)
+    assert (
+        campaign.reset_incomplete_batch(
+            tmp_path / "one",
+            archive_root=tmp_path / "archive",
+            expected_sample_ids=result["sample_ids"],
+            model=campaign.MODEL,
+            batch_id="one",
+            batch_fingerprint="frozen",
+        )
+        is None
+    )
+    assert not (tmp_path / "archive").exists()
+    assert (
+        execute(tmp_path, lambda *_a, **_k: pytest.fail("Rerun"), resume=True)["status"]
+        == "complete"
+    )
+
+
+def test_incomplete_wrong_log_identity_is_not_reset(tmp_path):
+    result = execute(tmp_path, lambda task, **kw: create_log(task, kw, missing=("oversight-0002",)))
+    log_path = Path(result["log_paths"][0])
+    log = campaign._read_log(log_path)
+    log.eval.metadata["campaign_batch_id"] = "another-batch"
+    write_eval_log(log, log_path)
+    with pytest.raises(campaign.CampaignError, match="log identity"):
+        campaign.reset_incomplete_batch(
+            tmp_path / "one",
+            archive_root=tmp_path / "archive",
+            expected_sample_ids=result["sample_ids"],
+            model=campaign.MODEL,
+            batch_id="one",
+            batch_fingerprint="frozen",
+        )
+    assert log_path.exists() and not (tmp_path / "archive").exists()

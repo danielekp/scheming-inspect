@@ -292,26 +292,104 @@ def test_cost_report_failure_never_stops_or_skips_work(tmp_path, monkeypatch):
     assert result["stages"]["fixed"] == {"planned": 160, "settled": 160, "pending": 0}
 
 
-def test_started_batch_reconciles_without_reconstructing_target(tmp_path):
-    _, _, read = setup_base(tmp_path)
+def test_resume_archives_incomplete_attempt_and_reruns_its_whole_frozen_batch(tmp_path):
+    _, source_log, _ = setup_base(tmp_path)
+    partial_log = None
+    original_ids, paths = [], {}
+
+    def read(path):
+        return source_log if path.name == "source.eval" else partial_log
 
     def interrupted(task, **kwargs):
-        kwargs["log_dir"].mkdir(parents=True)
-        (kwargs["log_dir"] / "batch.json").write_text(json.dumps({"status": "started"}))
-        raise RuntimeError("interrupted")
+        nonlocal partial_log
+        original_ids.extend(kwargs["expected_sample_ids"])
+        directory = kwargs["log_dir"]
+        directory.mkdir(parents=True)
+        output = directory / "result.eval"
+        output.write_bytes(b"immutable partial attempt with one invalid outcome")
+        journal = {
+            key: kwargs[key]
+            for key in ("batch_id", "stage", "model", "fingerprint", "model_roles", "max_samples")
+        }
+        journal.update(sample_ids=original_ids, status="interrupted", log_paths=[str(output)])
+        (directory / "batch.json").write_text(json.dumps(journal))
+        paths.update(directory=directory, partial=output)
+        partial_log = NS(
+            status="error",
+            eval=NS(
+                model=MODEL,
+                metadata={
+                    "campaign_batch_id": kwargs["batch_id"],
+                    "campaign_fingerprint": kwargs["fingerprint"],
+                },
+            ),
+            samples=[
+                NS(
+                    id=original_ids[0],
+                    epoch=1,
+                    error=None,
+                    limit=None,
+                    metadata={"behavior": {"completed": 1, "schema_valid": 0}},
+                )
+            ],
+        )
+        raise RuntimeError("interrupted after the first invalid-format answer")
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="interrupted"):
         run(tmp_path, read, interrupted)
+    assert len(original_ids) == 2
     calls = []
 
-    def reconcile(task, **kwargs):
-        calls.append(task)
-        assert task is None
-        return {"status": "blocked"}
+    def execute(task, **kwargs):
+        assert task is not None
+        ids = [str(sample.id) for sample in task.dataset]
+        assert ids == kwargs["expected_sample_ids"]
+        if not calls:
+            assert ids == original_ids
+            saved = json.loads((tmp_path / "poststages.json").read_text())
+            assert len(saved["batches"][0]["restarts"]) == 1
+            assert saved["batches"][0]["status"] == "planned"
+            assert saved["batches"][0]["log_paths"] == []
+            assert not paths["partial"].exists()
+        calls.append((kwargs["stage"], ids))
+        return {
+            "status": "complete",
+            "sample_status_counts": {"invalid_schema": 1, "success": len(ids) - 1},
+        }
 
-    result = run(tmp_path, read, reconcile, resume=True)
-    assert result["status"] == "blocked" and calls == [None]
-    assert result["stages"]["audit_main"]["settled"] == 0
+    result = run(tmp_path, read, execute, resume=True)
+    assert result["status"] == "complete"
+    assert sum(len(ids) for _, ids in calls) == 164
+    archives = list((tmp_path.parent / (tmp_path.name + "-superseded")).rglob("result.eval"))
+    assert len(archives) == 1
+    assert archives[0].read_bytes() == b"immutable partial attempt with one invalid outcome"
+    assert not archives[0].is_relative_to(tmp_path)
+    assert result["logged_sample_outcomes"]["audit_main"]["invalid_schema"] == 1
+
+
+def test_completed_invalid_outcome_is_preserved_on_resume(tmp_path, monkeypatch):
+    _, _, read = setup_base(tmp_path)
+
+    def complete(task, **kwargs):
+        return {
+            "status": "complete",
+            "sample_status_counts": {"invalid_schema": len(kwargs["expected_sample_ids"])},
+        }
+
+    first = run(tmp_path, read, complete)
+
+    def forbid_reset(*args, **kwargs):
+        pytest.fail("A completed invalid outcome must not be selected for rerun")
+
+    monkeypatch.setattr(campaign, "reset_incomplete_batch", forbid_reset)
+
+    def resume(task, **kwargs):
+        assert task is None
+        return {"status": "complete"}
+
+    again = run(tmp_path, read, resume, resume=True)
+    assert again == first
+    assert again["logged_sample_outcomes"]["audit_main"] == {"invalid_schema": 2}
 
 
 def test_resume_rejects_mutated_source_and_config(tmp_path):
