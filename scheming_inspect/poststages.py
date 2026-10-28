@@ -49,6 +49,29 @@ def digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
+def execution_fingerprint(manifest: dict, batch: dict) -> str:
+    """Keep completed journals tied to their explicitly preserved source revision."""
+    current = manifest["fingerprint"]
+    fingerprint = batch.get("execution_fingerprint", current)
+    if fingerprint == current:
+        return fingerprint
+    if batch["status"] in COMPLETE_BATCH_STATES:
+        for revision in manifest.get("source_revisions", []):
+            if not isinstance(revision, dict):
+                continue
+            preserved = revision.get("preserved_poststage_fingerprints", {})
+            if (
+                isinstance(preserved, dict)
+                and batch["batch_id"] in preserved
+                and preserved[batch["batch_id"]] == fingerprint
+            ):
+                return fingerprint
+    raise ValueError(
+        "Historical post-stage execution fingerprint requires a completed batch "
+        "and an exact preservation record."
+    )
+
+
 def is_main_cell(cell: dict) -> bool:
     """Use the recorded original cell, including n; a smoke/ablation is not main."""
     return any(
@@ -664,7 +687,7 @@ def execute_poststages(
                 stage=old["stage"],
                 model=model,
                 provider={},
-                fingerprint=manifest["fingerprint"],
+                fingerprint=execution_fingerprint(manifest, old),
                 expected_sample_ids=old["sample_ids"],
                 model_roles=roles,
                 max_samples=max_samples,
@@ -715,11 +738,13 @@ def execute_poststages(
                 "selections": selections,
                 "sample_ids": ids,
                 "status": "planned",
+                "execution_fingerprint": manifest["fingerprint"],
             }
             manifest["batches"].append(batch)
             manifest["status"] = "running"
             campaign.atomic_json(path, manifest)
         stage = batch["stage"]
+        batch_fingerprint = execution_fingerprint(manifest, batch)
         log_dir = root / "poststages" / stage / batch["batch_id"]
         journal_path = log_dir / "batch.json"
         journal = json.loads(journal_path.read_text()) if journal_path.exists() else {}
@@ -730,12 +755,17 @@ def execute_poststages(
                 expected_sample_ids=batch["sample_ids"],
                 model=model,
                 batch_id=batch["batch_id"],
-                batch_fingerprint=manifest["fingerprint"],
+                batch_fingerprint=batch_fingerprint,
                 read_log_fn=read_log_fn,
             )
             if restart:
                 batch.setdefault("restarts", []).append(restart)
-                batch.update(status="planned", log_paths=[], sample_status_counts={})
+                batch.update(
+                    status="planned",
+                    execution_fingerprint=manifest["fingerprint"],
+                    log_paths=[],
+                    sample_status_counts={},
+                )
                 batch.pop("error_type", None)
                 manifest.update(status="running")
                 manifest.pop("blocked_batch", None)
@@ -765,7 +795,7 @@ def execute_poststages(
                 stage=stage,
                 model=model,
                 provider={},
-                fingerprint=manifest["fingerprint"],
+                fingerprint=batch_fingerprint,
                 expected_sample_ids=batch["sample_ids"],
                 model_roles=roles,
                 max_samples=max_samples,

@@ -52,6 +52,65 @@ Historical partial recoveries remain readable with their original case selection
 
 Use the `--campaign-dir` analysis command above after recovery. Its canonical sample selections prevent failed and replacement attempts from counting twice, and `summary.json` records the excluded attempts and source revisions. Reading all raw logs together would lose this distinction.
 
+## Repairing the audit metric schema
+
+Older code can stop during `audit_main` with `key ... isn't present in the score value dictionary` when a batch mixes scenario families. The repaired scorer returns all audit metric names and uses NaN for inapplicable dimensions, so they are excluded from averages. Judge prompts, labels, and the underlying experiments are unchanged.
+
+Because campaign source hashes are frozen, applying the code fix also requires an explicit recorded revision. With the runner stopped, preview the narrow repair, then apply it:
+
+```sh
+uv run python -m scripts.repair_audit_schema --campaign-dir logs/full-campaign
+uv run python -m scripts.repair_audit_schema --campaign-dir logs/full-campaign --apply
+bash scripts/run_full.sh --resume
+```
+
+This repair requires all base batches to be complete and no committed post-stage progress. It preserves base results, archives the incomplete audit attempt, and records both old and corrected source identities. The interrupted audit batch is rerun in full under the existing restart policy. The helper makes no model calls.
+
+## Invalid follow-up responses
+
+An interrogator response can finish normally yet contain invalid JSON, such as a missing closing brace. Invalid questions now end only that interview and produce explicit unscored results. The code does not repair the JSON, invent a question, or count the failed interview as a denial or a not-guilty verdict. Unfinished target answers and requests for unavailable tools are also left unscored. Unexpected programming errors and failed target/interrogator API calls still surface as errors.
+
+Inspect View shows the raw failed response, phase, turn and stop reason in the sample store and score metadata under `followup_error`. Scalar sample metadata includes `followup_status=invalid_model_response` and `followup_failure_phase`. Earlier completed interview rounds remain available for analysis; missing later rounds are unknown. A batch's `success` count means processing completed, not that every score is usable: report unscored counts and each metric's actual denominator.
+
+For a campaign stopped by the older interrogation parser, with the code fix installed and the runner stopped:
+
+```sh
+uv run python -m scripts.repair_followup_responses --campaign-dir logs/full-campaign
+uv run python -m scripts.repair_followup_responses --campaign-dir logs/full-campaign --apply
+bash scripts/run_full.sh --resume
+```
+
+This narrow repair preserves committed base and post-stage results, archives the entire interrupted interrogation batch, and records the source revision. The incomplete batch is rerun with its original sample IDs and settings. Completed batches retain their original execution fingerprints and immutable logs. The helper makes no model calls.
+
+## Judge timeouts
+
+Inspect 0.3.281 gives scoring half the sample time limit: 150 seconds for the
+300-second fixed-followup tasks. A scoring timeout is a sample error and, with
+`fail_on_error=True`, interrupts the batch. The existing `GenerateConfig.timeout`
+setting limits retries but does not interrupt an in-flight call.
+
+Judge calls now have a separate 90-second wall-clock deadline. If it expires,
+the target reply stays in the log and the annotation is explicitly unscored
+(`grader_failed`, with a deadline explanation). It is excluded from admission or
+denial rates, and the other samples continue. External cancellation still
+propagates. This does not change the target prompts, sample selection, token
+limits, or spending policy.
+
+For the older fixed-followup batch stopped by a scoring timeout, install the fix
+with the runner stopped, then record the revision and resume:
+
+```sh
+uv run python -m scripts.repair_judge_timeout --campaign-dir logs/full-campaign
+uv run python -m scripts.repair_judge_timeout --campaign-dir logs/full-campaign --apply
+bash scripts/run_full.sh --resume
+```
+
+The repair preserves all committed results and prior revision records. It
+archives the entire incomplete fixed-followup batch and schedules its original
+sample IDs again. Completed batches retain their original execution fingerprints
+and logs. The helper makes no model calls; it is specific to this stopped repair,
+not a step to repeat on every ordinary resume.
+
 ## Interpretation
 
 The saved smoke run suggests roughly $10.50 for the base matrix if its average cost generalized, but eight cases are a weak cost sample. Follow-up counts and reasoning lengths can materially change the final cost. One fixed source-action creates 160 continuations and their grader calls. This estimate is not a limit on the now-uncapped campaign.

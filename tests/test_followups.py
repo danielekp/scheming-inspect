@@ -556,7 +556,7 @@ class SolverTests(unittest.IsolatedAsyncioTestCase):
         verdict = await f.interrogation_verdict()(state, Target(""))
         self.assertEqual(verdict.value["not_guilty"], 1)
 
-    async def test_malformed_interrogator_question_fails_without_target_call(self):
+    async def test_malformed_interrogator_question_is_unscored_without_target_call(self):
         state = state_for(f.interrogation_samples([source(), source("i1", False)])[0])
         interrogator = SimpleNamespace(
             generate=AsyncMock(return_value=output('{"question":"one","question":"two"}'))
@@ -569,9 +569,87 @@ class SolverTests(unittest.IsolatedAsyncioTestCase):
                 interrogator if kw.get("role") == "interrogator" else target
             ),
         ):
-            with self.assertRaises(ValueError):
-                await f.interrogation_solver()(state, AsyncMock())
+            await f.interrogation_solver()(state, AsyncMock())
         target.generate.assert_not_called()
+        self.assertEqual(state.store.get("interrogation_rounds"), [])
+        self.assertEqual(state.store.get("followup_error")["turn"], 1)
+        self.assertEqual(state.metadata["followup_status"], "invalid_model_response")
+        with patch.object(f, "judge_admission", AsyncMock()) as judge:
+            for scorer in (f.admission_metrics(), f.interrogation_verdict()):
+                result = await scorer(state, Target(""))
+                self.assertTrue(math.isnan(result.value))
+                self.assertEqual(result.reason, "invalid_model_response")
+                self.assertEqual(
+                    result.metadata["followup_error"]["raw"],
+                    '{"question":"one","question":"two"}',
+                )
+            judge.assert_not_called()
+
+    async def test_interrogation_without_completed_rounds_never_grades_base_answer(self):
+        state = state_for(f.interrogation_samples([source(), source("i1", False)])[0])
+        state.output = output("Old base answer, not an interview reply.")
+        state.store.set("interrogation_rounds", [])
+        with patch.object(f, "judge_admission", AsyncMock()) as judge:
+            for scorer in (f.admission_metrics(), f.interrogation_verdict()):
+                result = await scorer(state, Target(""))
+                self.assertTrue(math.isnan(result.value))
+                self.assertEqual(result.reason, "interview_incomplete")
+            judge.assert_not_called()
+
+    async def test_invalid_target_reply_is_unscored_without_a_judge_call(self):
+        tool_output = output("")
+        tool_output.message.tool_calls = [
+            ToolCall(id="unexpected", function="bash", arguments={"cmd": "true"})
+        ]
+        for reply in (output("No", "max_tokens"), tool_output):
+            with self.subTest(reply=reply):
+                state = state_for(f.fixed_samples([source()])[0])
+                fake = SimpleNamespace(generate=AsyncMock(return_value=reply))
+                with (
+                    patch.object(f, "get_model", return_value=fake),
+                    patch.object(f, "judge_admission", AsyncMock()) as judge,
+                ):
+                    await f.fixed_followup_solver()(state, AsyncMock())
+                    result = await f.admission_metrics()(state, Target(""))
+                    judge.assert_not_called()
+                self.assertTrue(math.isnan(result.value))
+                self.assertEqual(result.reason, "invalid_model_response")
+                self.assertEqual(state.output, reply)
+                self.assertEqual(state.store.get("followup_error")["phase"], "target_reply")
+                self.assertEqual(
+                    len(state.store.get("followup_error")["tool_calls"]),
+                    len(reply.message.tool_calls or []),
+                )
+
+    async def test_generation_errors_still_propagate(self):
+        for exc in (ConnectionError("offline"), RuntimeError("bug"), ValueError("bad config")):
+            for mode in ("fixed", "interrogation"):
+                with self.subTest(exc=exc, mode=mode):
+                    sample = (
+                        f.fixed_samples([source()])[0]
+                        if mode == "fixed"
+                        else f.interrogation_samples([source(), source("i1", False)])[0]
+                    )
+                    state = state_for(sample)
+                    fake = SimpleNamespace(generate=AsyncMock(side_effect=exc))
+                    solve = (
+                        f.fixed_followup_solver() if mode == "fixed" else f.interrogation_solver()
+                    )
+                    with patch.object(f, "get_model", return_value=fake):
+                        with self.assertRaises(type(exc)):
+                            await solve(state, AsyncMock())
+                    self.assertIsNone(state.store.get("followup_error"))
+
+    async def test_unexpected_parser_error_is_not_hidden(self):
+        state = state_for(f.interrogation_samples([source(), source("i1", False)])[0])
+        fake = SimpleNamespace(generate=AsyncMock(return_value=output('{"question":"Why?"}')))
+        with (
+            patch.object(f, "get_model", return_value=fake),
+            patch.object(f, "_parse_field", side_effect=ValueError("programming error")),
+        ):
+            with self.assertRaisesRegex(ValueError, "programming error"):
+                await f.interrogation_solver()(state, AsyncMock())
+        self.assertIsNone(state.store.get("followup_error"))
 
 
 if __name__ == "__main__":
