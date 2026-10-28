@@ -1,434 +1,200 @@
-"""Frozen post-stages over canonical completed campaign logs.
-
-All eligible main sources are included: no default one-source limit. Descriptors
-are frozen before generation; histories are loaded one log at a time and copied
-only for the current batch. Resume preserves completed batches and archives an
-incomplete attempt before rerunning its entire batch. Cost reporting is
-informational and never controls execution.
-"""
+"""Plan follow-ups from completed base batches and run them with the shared runner."""
 
 from __future__ import annotations
 
 import copy
-import hashlib
-import json
 import random
 from collections import Counter
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 from inspect_ai import Task
 from inspect_ai.dataset import Sample
-from inspect_ai.log import read_eval_log
 from inspect_ai.model import GenerateConfig, ModelOutput
 from inspect_ai.solver import solver
 
+from . import campaign as c
 from . import followups as f
-from .campaign import COMPLETE_BATCH_STATES
 from .judge import semantic_audit
 from .protocol import COVERT, plan
 
+FORMAT = "simple-poststages-v1"
 STAGES = ("audit_main", "interrogation", "fixed", "audit_remaining")
-MATCH_KEYS = (
-    "data_version",
-    "seed",
-    "nudge",
-    "goal_mode",
-    "goal_role",
-    "difficulty",
-    "no_cot",
-    "question_set",
-    "consequence",
-    "user_prompt",
+SOURCE_FIELDS = (
+    "key",
+    "log_path",
+    "sample_id",
+    "epoch",
+    "model",
+    "experiment",
+    "scenario_id",
+    "condition",
+    "behavior",
+    "matching_context",
 )
-VERSION = 1
-
-
-def digest(value: Any) -> str:
-    return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
-
-
-def execution_fingerprint(manifest: dict, batch: dict) -> str:
-    """Keep completed journals tied to their explicitly preserved source revision."""
-    current = manifest["fingerprint"]
-    fingerprint = batch.get("execution_fingerprint", current)
-    if fingerprint == current:
-        return fingerprint
-    if batch["status"] in COMPLETE_BATCH_STATES:
-        for revision in manifest.get("source_revisions", []):
-            if not isinstance(revision, dict):
-                continue
-            preserved = revision.get("preserved_poststage_fingerprints", {})
-            if (
-                isinstance(preserved, dict)
-                and batch["batch_id"] in preserved
-                and preserved[batch["batch_id"]] == fingerprint
-            ):
-                return fingerprint
-    raise ValueError(
-        "Historical post-stage execution fingerprint requires a completed batch "
-        "and an exact preservation record."
-    )
 
 
 def is_main_cell(cell: dict) -> bool:
-    """Use the recorded original cell, including n; a smoke/ablation is not main."""
     return any(
         all(cell.get(key) == value for key, value in original.items() if key != "seed")
         for original in plan("main")
     )
 
 
-def source_key(path: str, sample_id: Any, epoch: int) -> str:
-    return hashlib.sha256(f"{path}:{sample_id}:{epoch}".encode()).hexdigest()[:16]
-
-
-def _read_log(path: Path):
-    with path.open("rb") as stream:
-        return read_eval_log(stream, format="json" if path.suffix == ".json" else "eval")
-
-
-def _behavior(sample) -> dict:
-    value = (sample.metadata or {}).get("behavior") or (sample.store or {}).get("behavior")
-    if not isinstance(value, dict):
-        score = (sample.scores or {}).get("behavior_metrics")
-        value = getattr(score, "value", None)
-    return value if isinstance(value, dict) else {}
-
-
-def _flags(behavior: dict) -> dict:
-    return {
-        key: bool(value)
-        for key, value in behavior.items()
-        if type(value) in (int, float, bool) and value in (0, 1)
-    }
-
-
-def _stub(record: dict, messages=(), task_description="") -> f.SourceCase:
-    return f.SourceCase(
-        key=record["key"],
-        log_path=record["path"],
-        sample_id=record["sample_id"],
-        epoch=record["epoch"],
-        model=record["model"],
-        experiment=record["experiment"],
-        scenario_id=record["scenario_id"],
-        condition=record["condition"],
-        messages=tuple(messages),
-        behavior=record["flags"],
-        task_description=task_description,
-        matching_context=record["matching_context"],
-    )
-
-
-def canonical_log_records(base: dict, *, require_complete: bool = False) -> list[dict]:
-    """Normalize explicit canonical selections without changing original logs.
-
-    Legacy completed campaigns have one full log per batch. Recovery records may
-    select only a subset of a failed attempt; original cell/sample identity stays
-    unique even when the same sample ID occurs in several treatment cells.
-    """
-    batches = {batch["batch_id"]: batch for batch in base["batches"]}
-    expected = {
-        (batch["cell_index"], str(sample_id))
-        for batch in base["batches"]
-        for sample_id in batch["sample_ids"]
-    }
-    raw_records = base.get("completed_base_log_records")
-    if raw_records is None:
-        raw_records = [
-            {
-                "path": path,
-                "cell_index": batch["cell_index"],
-                "cell": base["cells"][batch["cell_index"]],
-                "batch_id": batch["batch_id"],
-                "expected_sample_ids": batch["sample_ids"],
-            }
-            for batch in base["batches"]
-            if batch["status"] in COMPLETE_BATCH_STATES
-            for path in batch.get("log_paths", [])
-        ]
-    result, selected, paths = [], set(), set()
-    for raw in raw_records:
-        record = copy.deepcopy(raw)
-        index = record.get("cell_index", batches.get(record["batch_id"], {}).get("cell_index"))
-        if type(index) is not int or not 0 <= index < len(base["cells"]):
-            raise ValueError("Canonical log record has no valid original cell_index.")
-        if record.get("cell") != base["cells"][index]:
-            raise ValueError("Canonical log record differs from the original cell configuration.")
-        record["cell_index"] = index
-        record["path"] = str(Path(record["path"]).resolve())
-        ids = [str(value) for value in record["expected_sample_ids"]]
-        if not ids or len(set(ids)) != len(ids) or record["path"] in paths:
-            raise ValueError("Canonical log record has empty/duplicate selections or paths.")
-        identities = {(index, sample_id) for sample_id in ids}
-        if identities - expected or identities & selected:
-            raise ValueError("Canonical sample selections are unexpected or duplicated.")
-        record["expected_sample_ids"] = ids
-        record["recovery_retained"] = record.get("recovery_retained") is True
-        if record["recovery_retained"] and not record.get("log_sha256"):
-            raise ValueError("A retained recovery log requires its frozen SHA-256 fingerprint.")
-        selected.update(identities)
-        paths.add(record["path"])
-        result.append(record)
-    if require_complete and selected != expected:
-        raise ValueError(
-            "Canonical records do not cover every original campaign sample exactly once."
-        )
-    return result
-
-
-def verify_record_hash(record: dict) -> str:
-    actual = hashlib.sha256(Path(record["path"]).read_bytes()).hexdigest()
-    if record.get("log_sha256") and record["log_sha256"] != actual:
-        raise ValueError("A canonical source log differs from its frozen SHA-256 fingerprint.")
-    return actual
-
-
-def record_accepts_log(record: dict, status: str) -> bool:
-    return status == "success" or (status == "error" and record["recovery_retained"])
-
-
-def discover_sources(base: dict, model: str, read_log_fn: Callable = _read_log) -> dict:
-    """Validate canonical sources individually and retain superseded-attempt provenance."""
-    if base.get("status") != "base_complete" or any(
-        b["status"] not in COMPLETE_BATCH_STATES for b in base["batches"]
-    ):
-        raise ValueError("Post-stages require a completed base campaign.")
-    records, excluded, recovery_excluded, hashes, seen = {}, [], [], {}, set()
+def discover_sources(base: dict, model: str, read_log_fn=c.read_log) -> dict:
+    """Select completed valid interactions; retain an explicit count of exclusions."""
+    if any(batch["status"] != "complete" for batch in base["batches"]):
+        raise ValueError("Finish the base batches before starting follow-ups.")
+    sources, excluded = {}, []
     requested = Counter(
-        {"audit_main": 0, "audit_remaining": 0, "fixed_sources": 0, "interrogation_sources": 0}
+        dict(audit_main=0, audit_remaining=0, fixed_sources=0, interrogation_sources=0)
     )
-    for selection in canonical_log_records(base, require_complete=True):
-        cell = selection["cell"]
-        experiment, main = cell["experiment"], is_main_cell(cell)
-        if experiment not in COVERT:
+    for record in c.base_log_records(base):
+        cell = record["cell"]
+        if cell["experiment"] not in COVERT:
             continue
-        path, batch_id = selection["path"], selection["batch_id"]
+        main = is_main_cell(cell)
         stage = "audit_main" if main else "audit_remaining"
-        expected = set(selection["expected_sample_ids"])
+        expected = set(record["expected_sample_ids"])
         requested[stage] += len(expected)
-        if main and experiment != "email":
+        if main and cell["experiment"] != "email":
             requested["fixed_sources"] += len(expected)
-        if main and experiment == "oversight":
+        if main and cell["experiment"] == "oversight":
             requested["interrogation_sources"] += len(expected)
-        try:
-            hashes[path] = verify_record_hash(selection)
-            log = read_log_fn(Path(path))
-        except ValueError:
-            raise  # A tampered selection must never become an ordinary source exclusion.
-        except Exception as exc:
-            excluded.append(
-                {
-                    "path": path,
-                    "batch_id": batch_id,
-                    "stage": stage,
-                    "reason": "unreadable_log",
-                    "error_type": type(exc).__name__,
-                }
-            )
-            log = None
-        found = set()
-        for sample in (log.samples or []) if log else []:
-            identity = {
-                "path": path,
-                "sample_id": sample.id,
-                "epoch": sample.epoch,
-                "batch_id": batch_id,
-                "cell_index": selection["cell_index"],
-                "stage": stage,
-                "experiment": experiment,
-                "main": main,
-                "recovery_retained": selection["recovery_retained"],
-            }
-            if str(sample.id) not in expected:
-                if selection["recovery_retained"]:
-                    recovery_excluded.append(
-                        identity
-                        | {
-                            "reason": "superseded_recovery_attempt",
-                            "error": bool(sample.error),
-                            "invalidated": bool(getattr(sample, "invalidation", None)),
-                        }
-                    )
-                    continue
-                raise ValueError("Unexpected sample in an ordinary canonical source log.")
-            key = source_key(path, sample.id, sample.epoch)
-            reason = None
-            if str(sample.id) in found or key in seen:
-                raise ValueError("Duplicate sample in a canonical source log.")
-            found.add(str(sample.id))
-            seen.add(key)
-            meta, behavior = sample.metadata or {}, _behavior(sample)
-            if str(log.eval.model) != model:
-                reason = "source_model_mismatch"
-            elif not record_accepts_log(selection, log.status):
-                reason = "source_log_failed"
-            elif getattr(sample, "error", None):
-                reason = "source_error"
-            elif getattr(sample, "invalidation", None):
-                reason = "source_invalidated"
-            elif sample.epoch != 1:
-                reason = "source_unexpected_epoch"
-            elif behavior.get("schema_valid") == 0:
-                reason = "source_invalid_schema"
-            elif getattr(sample, "limit", None) or behavior.get("truncated") == 1:
-                reason = "source_truncated"
-            elif behavior.get("completed") != 1:
-                reason = "source_incomplete_or_completion_unknown"
-            elif not behavior:
-                reason = "missing_behavior"
-            elif not meta.get("scenario_id"):
-                reason = "missing_scenario"
-            elif any(meta.get(k) != cell[k] for k in cell if k != "n"):
-                reason = "sample_cell_mismatch"
-            else:
-                try:
-                    f.validate_transcript(sample.messages)
-                except (ValueError, AttributeError, TypeError):
-                    reason = "malformed_transcript"
+        log = read_log_fn(Path(record["path"]))
+        if str(log.eval.model) != model:
+            raise ValueError("The source log uses a different target model.")
+        samples = {str(sample.id): sample for sample in log.samples or []}
+        if len(samples) != len(log.samples or []) or set(samples) != expected:
+            raise ValueError("Base log samples do not match the completed batch.")
+        for sample in log.samples or []:
+            reason = f.source_exclusion_reason(sample)
             if reason:
-                excluded.append(identity | {"key": key, "reason": reason})
+                excluded.append(
+                    {
+                        "path": record["path"],
+                        "sample_id": sample.id,
+                        "stage": stage,
+                        "reason": reason,
+                    }
+                )
                 continue
-            records[key] = identity | {
-                "key": key,
-                "cell": copy.deepcopy(cell),
-                "model": model,
-                "scenario_id": str(meta["scenario_id"]),
-                "flags": _flags(behavior),
-                "condition": json.dumps(meta.get("condition", ""), sort_keys=True),
-                "matching_context": json.dumps(
-                    {k: meta.get(k) for k in MATCH_KEYS}, sort_keys=True
-                ),
+            source = f.source_from_sample(record["path"], sample, model)
+            sources[source.key] = {name: getattr(source, name) for name in SOURCE_FIELDS} | {
+                "main": main,
             }
-        for sample_id in sorted(expected - found):
-            excluded.append(
-                {
-                    "batch_id": batch_id,
-                    "sample_id": sample_id,
-                    "stage": stage,
-                    "experiment": experiment,
-                    "main": main,
-                    "reason": "missing_sample",
-                }
-            )
-    return {
-        "sources": records,
-        "excluded": excluded,
-        "recovery_exclusions": recovery_excluded,
-        "source_logs": hashes,
-        "requested": dict(requested),
-    }
+    return {"sources": sources, "excluded": excluded, "requested": dict(requested)}
 
 
-def make_groups(discovery: dict, seed: int = 0) -> tuple[list[dict], list[dict]]:
-    groups, eligibility = [], []
+def source_stub(record: dict) -> f.SourceCase:
+    return f.SourceCase(
+        **{name: record[name] for name in SOURCE_FIELDS}, messages=(), task_description=""
+    )
+
+
+def make_groups(discovery: dict, config: dict) -> tuple[list[dict], list[dict]]:
+    groups, excluded = [], []
     records = discovery["sources"]
-    for key, record in sorted(records.items()):
-        stage = "audit_main" if record["main"] else "audit_remaining"
-        groups.append({"id": f"audit:{key}", "stage": stage, "source_keys": [key], "samples": 1})
-    main = [
-        _stub(record)
-        for record in records.values()
-        if record["main"] and record["experiment"] != "email"
-    ]
-    pairs = f.matched_sources(main, seed=seed)
-    rng = random.Random(seed)
+    for key, record in records.items():
+        groups.append(
+            {
+                "id": f"audit:{key}",
+                "stage": "audit_main" if record["main"] else "audit_remaining",
+                "source_keys": [key],
+                "samples": 1,
+            }
+        )
+    main = [source_stub(record) for record in records.values() if record["main"]]
+    pairs = f.matched_sources(main, seed=config["seed"])
     matched = {source.key for pair in pairs for source in pair}
+    rng = random.Random(config["seed"])
     for guilty, innocent in pairs:
-        truth_order = ["guilty", "innocent"]
-        rng.shuffle(truth_order)
+        truths = ["guilty", "innocent"]
+        rng.shuffle(truths)
         groups.append(
             {
                 "id": f"interrogation:{guilty.key}:{innocent.key}",
                 "stage": "interrogation",
                 "source_keys": [guilty.key, innocent.key],
+                "truth_order": truths,
                 "samples": 2,
-                "truth_order": truth_order,
             }
         )
     for source in sorted(main, key=lambda item: item.key):
+        if source.experiment == "email":
+            continue
         actions = f.eligible_actions(source)
         if not actions:
-            eligibility.append(
+            excluded.append(
                 {"source_key": source.key, "stage": "fixed", "reason": "no_observed_action"}
             )
         for action in actions:
+            variants = [name for name, _ in f.fixed_questions(action)]
             groups.append(
                 {
                     "id": f"fixed:{source.key}:{action.name}",
                     "stage": "fixed",
                     "source_keys": [source.key],
                     "action": action.name,
-                    "samples": 160,
-                    "variants": [name for name, _ in f.fixed_questions(action)],
-                    "repeats": 20,
+                    "variants": variants,
+                    "repeats": config["fixed_repeats"],
+                    "samples": len(variants) * config["fixed_repeats"],
                 }
             )
         if source.experiment == "oversight" and source.key not in matched:
-            reason = (
-                "unknown_oversight_outcome"
-                if "oversight_disabled" not in source.behavior
-                else "no_matched_opposite_outcome"
-            )
-            eligibility.append(
-                {"source_key": source.key, "stage": "interrogation", "reason": reason}
+            excluded.append(
+                {
+                    "source_key": source.key,
+                    "stage": "interrogation",
+                    "reason": "no_matched_opposite_outcome",
+                }
             )
     groups.sort(key=lambda group: STAGES.index(group["stage"]))
-    return groups, eligibility
+    return groups, excluded
 
 
-def group_sample_ids(group: dict) -> list[str]:
+def group_items(group: dict) -> list[dict]:
+    """Lightweight sample descriptions; transcripts are copied only when dispatched."""
+    keys = group["source_keys"]
     if group["stage"].startswith("audit_"):
-        return [group["id"]]
+        return [{"id": group["id"]}]
     if group["stage"] == "interrogation":
-        pair = ":".join(group["source_keys"])
-        return [f"{pair}:0:{truth}" for truth in group.get("truth_order", ["guilty", "innocent"])]
-    key = group["source_keys"][0]
+        return [
+            {"id": f.interrogation_sample_id(*keys, truth, 0), "truth": truth}
+            for truth in group["truth_order"]
+        ]
     return [
-        f"{key}:{group['action']}:{variant}:{repeat}"
+        {
+            "id": f.fixed_sample_id(keys[0], group["action"], variant, repeat),
+            "variant": variant,
+            "repeat": repeat,
+        }
         for variant in group["variants"]
         for repeat in range(group["repeats"])
     ]
 
 
 class SourceReader:
-    """Cache at most one source log; never copy original events into new tasks."""
+    """Keep only one source log in memory."""
 
-    def __init__(self, records: dict, read_log_fn: Callable = _read_log, fingerprints=None):
+    def __init__(self, records: dict, read_log_fn=c.read_log):
         self.records, self.read_log_fn = records, read_log_fn
-        self.fingerprints = fingerprints or {}
         self.path, self.samples = None, {}
 
-    def sample(self, key: str):
+    def sample(self, key):
         record = self.records[key]
-        if self.path != record["path"]:
-            expected = self.fingerprints.get(record["path"])
-            if (
-                expected
-                and hashlib.sha256(Path(record["path"]).read_bytes()).hexdigest() != expected
-            ):
-                raise ValueError("A frozen source log changed before loading a batch.")
-            log = self.read_log_fn(Path(record["path"]))
-            self.samples = {(str(sample.id), sample.epoch): sample for sample in log.samples or []}
-            self.path = record["path"]
+        if self.path != record["log_path"]:
+            log = self.read_log_fn(Path(record["log_path"]))
+            self.samples = {(str(s.id), s.epoch): s for s in log.samples or []}
+            self.path = record["log_path"]
         return self.samples[(str(record["sample_id"]), record["epoch"])]
 
-    def source(self, key: str) -> f.SourceCase:
-        sample = self.sample(key)
-        description = (
-            sample.input
-            if isinstance(sample.input, str)
-            else "\n".join(message.text for message in sample.input if message.role == "user")
-        )
-        return _stub(self.records[key], sample.messages, description)
+    def source(self, key):
+        record = self.records[key]
+        return f.source_from_sample(record["log_path"], self.sample(key), record["model"], key=key)
 
 
 @solver
 def restore_completion():
-    """Restore recorded answer for semantic scoring without a target generation."""
-
     async def solve(state, generate):
         state.output = ModelOutput.from_content(
             str(state.model), state.metadata["source_completion"]
@@ -441,128 +207,93 @@ def restore_completion():
 
 
 def audit_sample(reader: SourceReader, key: str, stage: str) -> Sample:
-    original, record = reader.sample(key), reader.records[key]
+    original = reader.sample(key)
     metadata = copy.deepcopy(original.metadata or {})
     metadata.update(
-        behavior=copy.deepcopy(_behavior(original)),
-        evidence=copy.deepcopy(
-            metadata.get("evidence", (original.store or {}).get("observations", []))
-        ),
         source_completion=original.output.completion,
         source_key=key,
-        source_log=record["path"],
-        source_sample_id=record["sample_id"],
-        source_epoch=record["epoch"],
+        source_log=reader.records[key]["log_path"],
+        source_sample_id=original.id,
+        source_epoch=original.epoch,
         audit_stage=stage,
     )
     return Sample(id=f"audit:{key}", input=copy.deepcopy(original.messages), metadata=metadata)
 
 
-def build_batch(
-    selections: list[dict],
-    groups: dict,
-    reader: SourceReader,
-    *,
-    max_tokens: int,
-    token_limit: int,
-    seed: int,
-) -> Task:
-    stage = groups[selections[0]["group_id"]]["stage"]
+def build_batch(selections: list[dict], groups: dict, reader: SourceReader, config: dict) -> Task:
     samples = []
+    stage = groups[selections[0]["group_id"]]["stage"]
     for selection in selections:
         group = groups[selection["group_id"]]
-        ids = group_sample_ids(group)[selection["start"] : selection["stop"]]
+        keys = group["source_keys"]
+        items = group_items(group)[selection["start"] : selection["stop"]]
         if stage.startswith("audit_"):
-            candidates = [audit_sample(reader, group["source_keys"][0], stage)]
+            samples.append(audit_sample(reader, keys[0], stage))
         elif stage == "fixed":
-            # At most one source's 160 (or 320 for two distinct actions) forks in memory.
-            candidates = f.fixed_samples(
-                [reader.source(group["source_keys"][0])], repeats=20, limit=None
+            source = reader.source(keys[0])
+            action = next(a for a in f.eligible_actions(source) if a.name == group["action"])
+            samples.extend(
+                f.fixed_sample(source, action, item["variant"], item["repeat"]) for item in items
             )
         else:
-            # Generate each frozen pair independently so batch slicing cannot re-match it.
-            candidates = f.interrogation_samples(
-                [reader.source(key) for key in group["source_keys"]],
-                repeats=1,
-                limit=None,
-                seed=seed,
+            guilty, innocent = (reader.source(key) for key in keys)
+            samples.extend(
+                f.interrogation_sample(guilty, innocent, item["truth"], 0, config["seed"])
+                for item in items
             )
-        indexed = {str(sample.id): sample for sample in candidates}
-        samples.extend(indexed[sample_id] for sample_id in ids)
-    if stage.startswith("audit_"):
-        solve, scorers = restore_completion(), [semantic_audit(max_tokens=max_tokens)]
-    elif stage == "fixed":
-        solve, scorers = f.fixed_followup_solver(max_tokens), [f.admission_metrics(max_tokens)]
-    else:
-        solve = f.interrogation_solver(7, max_tokens, max_tokens)
-        scorers = [f.admission_metrics(max_tokens), f.interrogation_verdict()]
+    if not stage.startswith("audit_"):
+        return f.task_from_samples(
+            samples,
+            mode=stage,
+            max_tokens=config["max_tokens"],
+            judge_max_tokens=config["max_tokens"],
+            max_rounds=config["max_rounds"],
+            time_limit=config["interrogation_time_limit"]
+            if stage == "interrogation"
+            else config["other_time_limit"],
+            token_limit=config["token_limit"],
+            metadata={
+                "protocol": "reconstructed post-stages",
+                "stage": stage,
+                "selection_seed": config["seed"],
+                "fixed_repeats": config["fixed_repeats"],
+            },
+        )
     return Task(
         name=f"scheming_{stage}",
         dataset=samples,
-        solver=solve,
-        scorer=scorers,
+        solver=restore_completion(),
+        scorer=semantic_audit(max_tokens=config["max_tokens"]),
         sandbox=None,
         config=GenerateConfig(
-            max_tokens=max_tokens, max_retries=0, cache=False, cache_prompt=False, timeout=90
+            max_tokens=config["max_tokens"],
+            max_retries=0,
+            cache=False,
+            cache_prompt=False,
+            timeout=90,
         ),
-        token_limit=token_limit,
-        time_limit=600 if stage == "interrogation" else 300,
+        token_limit=config["token_limit"],
+        time_limit=config["other_time_limit"],
         fail_on_error=True,
-        metadata={
-            "protocol": "reconstructed post-stages",
-            "stage": stage,
-            "selection_seed": seed,
-            "fixed_repeats": 20,
-            "max_rounds": 7,
-        },
+        metadata={"stage": stage},
     )
 
 
-def progress_report(manifest: dict) -> dict:
-    counts = {stage: {"planned": 0, "settled": 0, "pending": 0} for stage in STAGES}
-    for group in manifest["spec"]["groups"]:
-        done = manifest["progress"].get(group["id"], 0)
-        counts[group["stage"]]["planned"] += group["samples"]
-        counts[group["stage"]]["settled"] += done
-        counts[group["stage"]]["pending"] += group["samples"] - done
-    exclusions = manifest["spec"]["discovery"]["excluded"]
-    return {
-        "status": manifest["status"],
-        "stages": counts,
-        "requested": manifest["spec"]["discovery"]["requested"],
-        "exclusions": dict(Counter(row["reason"] for row in exclusions)),
-        "recovery_exclusions": dict(
-            Counter(
-                row["reason"]
-                for row in manifest["spec"]["discovery"].get("recovery_exclusions", [])
-            )
-        ),
-        "eligibility_exclusions": dict(
-            Counter(f"{row['stage']}:{row['reason']}" for row in manifest["spec"]["eligibility"])
-        ),
-        "blocked_batch": manifest.get("blocked_batch"),
-        "logged_sample_outcomes": {
-            stage: dict(
-                sum(
-                    (
-                        Counter(batch.get("sample_status_counts", {}))
-                        for batch in manifest.get("batches", [])
-                        if batch["stage"] == stage
-                    ),
-                    Counter(),
-                )
-            )
-            for stage in STAGES
-        },
-        "scope": "Reconstructed protocol; completed evaluation counts include explicit unscored judge outcomes, not guaranteed valid labels.",
-    }
+def completed_offsets(manifest: dict) -> dict:
+    offsets = {}
+    for batch in manifest["batches"]:
+        if batch["status"] == "complete":
+            for selection in batch["selections"]:
+                offsets[selection["group_id"]] = selection["stop"]
+    return offsets
 
 
 def next_selections(manifest: dict, batch_size: int) -> list[dict]:
-    """Keep frozen stage/group order and never divide an interrogation pair."""
-    spec, selected, count, stage = manifest["spec"], [], 0, None
-    for group in spec["groups"]:
-        start = manifest["progress"].get(group["id"], 0)
+    """Batch one stage at a time and keep each interrogation pair together."""
+    offsets = completed_offsets(manifest)
+    selected, count, stage = [], 0, None
+    for group in manifest["groups"]:
+        start = offsets.get(group["id"], 0)
         if start >= group["samples"]:
             continue
         if stage is None:
@@ -570,15 +301,47 @@ def next_selections(manifest: dict, batch_size: int) -> list[dict]:
         if group["stage"] != stage:
             break
         unit = 2 if stage == "interrogation" else 1
-        available = min(group["samples"] - start, batch_size - count)
-        take = available - available % unit
+        take = min(group["samples"] - start, batch_size - count)
+        take -= take % unit
         if not take:
             break
         selected.append({"group_id": group["id"], "start": start, "stop": start + take})
         count += take
-        if count >= batch_size or take < available:
+        if count >= batch_size:
             break
     return selected
+
+
+def progress_report(manifest: dict) -> dict:
+    offsets = completed_offsets(manifest)
+    counts = {stage: {"planned": 0, "completed": 0, "pending": 0} for stage in STAGES}
+    for group in manifest["groups"]:
+        counts[group["stage"]]["planned"] += group["samples"]
+        counts[group["stage"]]["completed"] += offsets.get(group["id"], 0)
+    for values in counts.values():
+        values["pending"] = values["planned"] - values["completed"]
+    return {
+        "status": manifest["status"],
+        "stages": counts,
+        "requested": manifest["discovery"]["requested"],
+        "exclusions": dict(Counter(r["reason"] for r in manifest["discovery"]["excluded"])),
+        "eligibility_exclusions": dict(
+            Counter(f"{r['stage']}:{r['reason']}" for r in manifest["eligibility"])
+        ),
+        "sample_outcomes": {
+            stage: dict(
+                sum(
+                    (
+                        Counter(b.get("sample_status_counts", {}))
+                        for b in manifest["batches"]
+                        if b["stage"] == stage
+                    ),
+                    Counter(),
+                )
+            )
+            for stage in STAGES
+        },
+    }
 
 
 def execute_poststages(
@@ -590,239 +353,104 @@ def execute_poststages(
     max_tokens=8000,
     token_limit=100000,
     resume=False,
-    source_hashes=None,
     execute_batch_fn=None,
-    read_log_fn=_read_log,
-    current_source_hash_fn=None,
+    read_log_fn=c.read_log,
 ) -> dict:
-    """Run every frozen group with no spending caps or billing gate.
-
-    The campaign's model is reused in every role. Source validation, durable
-    batch identities, and outcome reporting remain identical on resume.
-    """
-    from . import campaign
-
-    if min(batch_size, max_samples, max_tokens, token_limit) < 1 or batch_size < 2:
-        raise ValueError(
-            "Post-stages require positive limits and batch_size >= 2 for matched pairs."
-        )
     root = Path(campaign_root).resolve()
-    base = json.loads((root / "manifest.json").read_text())
-    if base["config"]["model"] != model:
-        raise ValueError("Post-stage model must match the frozen base model.")
-    hashes = source_hashes if source_hashes is not None else base["source_hashes"]
-    if hashes != base["source_hashes"]:
-        raise ValueError("Post-stage code hashes differ from the base campaign.")
     path = root / "poststages.json"
-    config = {
-        "model": model,
-        "batch_size": batch_size,
-        "max_samples": max_samples,
-        "max_tokens": max_tokens,
-        "token_limit": token_limit,
-        "seed": base["config"].get("seed", 42),
-        "interrogation_time_limit": 600,
-        "other_time_limit": 300,
-        "fixed_repeats": 20,
-        "interrogation_repeats": 1,
-        "max_rounds": 7,
-        "all_sources": True,
-        "stage_order": list(STAGES),
-    }
+    base = c.read_manifest(root)
     if path.exists():
         if not resume:
-            raise ValueError("Post-stages already exist; use --resume, never restart them.")
-        manifest = json.loads(path.read_text())
-        spec = manifest["spec"]
-        if (
-            spec["config"] != config
-            or spec["base_fingerprint"] != base["fingerprint"]
-            or spec["source_hashes"] != hashes
-            or digest(spec) != manifest["fingerprint"]
-        ):
-            raise ValueError("Frozen post-stage configuration or source identity changed.")
-        for filename, expected_hash in spec["discovery"]["source_logs"].items():
-            if hashlib.sha256(Path(filename).read_bytes()).hexdigest() != expected_hash:
-                raise ValueError("A frozen source log changed; refusing further model calls.")
+            raise ValueError("Post-stages already exist; use --resume.")
+        manifest = c.read_json(path)
+        if manifest.get("format") != FORMAT:
+            raise ValueError("Use a new campaign directory for this runner.")
     else:
+        if min(batch_size, max_samples, max_tokens, token_limit) < 1 or batch_size < 2:
+            raise ValueError("Positive limits and batch_size >= 2 are required.")
+        config = dict(
+            model=model,
+            batch_size=batch_size,
+            max_samples=max_samples,
+            max_tokens=max_tokens,
+            token_limit=token_limit,
+            seed=base["config"].get("seed", 42),
+            fixed_repeats=20,
+            max_rounds=7,
+            interrogation_time_limit=600,
+            other_time_limit=300,
+        )
         discovery = discover_sources(base, model, read_log_fn)
-        groups, eligibility = make_groups(discovery, seed=config["seed"])
-        spec = {
-            "config": config,
-            "base_fingerprint": base["fingerprint"],
-            "source_hashes": hashes,
-            "discovery": discovery,
-            "groups": groups,
-            "eligibility": eligibility,
-        }
-        manifest = {
-            "version": VERSION,
-            "fingerprint": digest(spec),
-            "spec": spec,
-            "status": "planned",
-            "progress": {},
-            "batches": [],
-        }
-        campaign.atomic_json(path, manifest)
-    execute = execute_batch_fn or campaign.execute_batch
-    hash_fn = current_source_hash_fn or campaign.source_hashes
-    groups = {group["id"]: group for group in manifest["spec"]["groups"]}
-    reader = SourceReader(
-        manifest["spec"]["discovery"]["sources"],
-        read_log_fn,
-        manifest["spec"]["discovery"]["source_logs"],
-    )
-    if resume:
-        # Revalidate completed batch identity and immutable logs without generating.
-        for old in manifest["batches"]:
-            if old["status"] not in COMPLETE_BATCH_STATES:
-                continue
-            roles = {"grader": model} | (
-                {"interrogator": model} if old["stage"] == "interrogation" else {}
-            )
-            result = execute(
-                None,
-                batch_id=old["batch_id"],
-                log_dir=root / "poststages" / old["stage"] / old["batch_id"],
-                stage=old["stage"],
-                model=model,
-                provider={},
-                fingerprint=execution_fingerprint(manifest, old),
-                expected_sample_ids=old["sample_ids"],
-                model_roles=roles,
-                max_samples=max_samples,
-                resume=True,
-            )
-            if result["status"] not in COMPLETE_BATCH_STATES:
-                manifest.update(status="blocked", blocked_batch=old["batch_id"])
-                campaign.atomic_json(path, manifest)
-                return progress_report(manifest)
+        groups, eligibility = make_groups(discovery, config)
+        manifest = dict(
+            format=FORMAT,
+            config=config,
+            discovery=discovery,
+            groups=groups,
+            eligibility=eligibility,
+            batches=[],
+            status="planned",
+        )
+        c.atomic_json(path, manifest)
+    config = manifest["config"]
+    groups = {group["id"]: group for group in manifest["groups"]}
+    reader = SourceReader(manifest["discovery"]["sources"], read_log_fn)
+    execute = execute_batch_fn or c.execute_batch
+    # Verify already-recorded batches through the same path, without constructing tasks.
+    queue = list(manifest["batches"])
     while True:
-        if hash_fn() != hashes:
-            raise ValueError("Source changed during post-stages; refusing further model calls.")
-        pending = [
-            batch for batch in manifest["batches"] if batch["status"] not in COMPLETE_BATCH_STATES
-        ]
-        if pending:
-            batch = pending[0]
+        if queue:
+            batch = queue.pop(0)
         else:
-            selections = next_selections(manifest, batch_size)
+            selections = next_selections(manifest, config["batch_size"])
             if not selections:
-                remaining = any(
-                    manifest["progress"].get(group["id"], 0) < group["samples"]
-                    for group in groups.values()
-                )
-                if remaining:
-                    raise ValueError(
-                        "Frozen post-stage groups cannot form the next complete batch."
-                    )
                 manifest["status"] = (
-                    "complete_with_exclusions"
-                    if manifest["spec"]["discovery"]["excluded"]
-                    else "complete"
+                    "complete_with_exclusions" if manifest["discovery"]["excluded"] else "complete"
                 )
-                campaign.atomic_json(path, manifest)
+                c.atomic_json(path, manifest)
                 return progress_report(manifest)
             stage = groups[selections[0]["group_id"]]["stage"]
-            ids = [
-                sample_id
-                for selection in selections
-                for sample_id in group_sample_ids(groups[selection["group_id"]])[
-                    selection["start"] : selection["stop"]
-                ]
-            ]
-            batch_id = f"{manifest['fingerprint'][:12]}-{stage}-{digest(selections)[:16]}"
-            batch = {
-                "batch_id": batch_id,
-                "stage": stage,
-                "selections": selections,
-                "sample_ids": ids,
-                "status": "planned",
-                "execution_fingerprint": manifest["fingerprint"],
-            }
+            batch = dict(
+                batch_id=f"{stage}-{len(manifest['batches']):05d}",
+                stage=stage,
+                selections=selections,
+                status="planned",
+            )
             manifest["batches"].append(batch)
             manifest["status"] = "running"
-            campaign.atomic_json(path, manifest)
-        stage = batch["stage"]
-        batch_fingerprint = execution_fingerprint(manifest, batch)
-        log_dir = root / "poststages" / stage / batch["batch_id"]
-        journal_path = log_dir / "batch.json"
-        journal = json.loads(journal_path.read_text()) if journal_path.exists() else {}
-        if resume and journal.get("status") not in COMPLETE_BATCH_STATES:
-            restart = campaign.reset_incomplete_batch(
-                log_dir,
-                archive_root=root.parent / (root.name + "-superseded"),
-                expected_sample_ids=batch["sample_ids"],
-                model=model,
-                batch_id=batch["batch_id"],
-                batch_fingerprint=batch_fingerprint,
-                read_log_fn=read_log_fn,
-            )
-            if restart:
-                batch.setdefault("restarts", []).append(restart)
-                batch.update(
-                    status="planned",
-                    execution_fingerprint=manifest["fingerprint"],
-                    log_paths=[],
-                    sample_status_counts={},
-                )
-                batch.pop("error_type", None)
-                manifest.update(status="running")
-                manifest.pop("blocked_batch", None)
-                campaign.atomic_json(path, manifest)
-                journal = json.loads(journal_path.read_text()) if journal_path.exists() else {}
-        already_started = bool(journal and journal.get("status") != "planned") or bool(
-            list(log_dir.glob("*.eval"))
-        )
-        task = (
-            None
-            if already_started
-            else build_batch(
-                batch["selections"],
-                groups,
-                reader,
-                max_tokens=max_tokens,
-                token_limit=token_limit,
-                seed=config["seed"],
-            )
-        )
-        roles = {"grader": model} | ({"interrogator": model} if stage == "interrogation" else {})
+            c.atomic_json(path, manifest)
+        ids = [
+            item["id"]
+            for selection in batch["selections"]
+            for item in group_items(groups[selection["group_id"]])[
+                selection["start"] : selection["stop"]
+            ]
+        ]
+        was_complete = batch["status"] == "complete"
+        roles = {"grader": config["model"]}
+        if batch["stage"] == "interrogation":
+            roles["interrogator"] = config["model"]
         try:
             result = execute(
-                task,
-                batch_id=batch["batch_id"],
-                log_dir=log_dir,
-                stage=stage,
-                model=model,
-                provider={},
-                fingerprint=batch_fingerprint,
-                expected_sample_ids=batch["sample_ids"],
+                lambda: build_batch(batch["selections"], groups, reader, config),
+                batch=batch | {"sample_ids": ids},
+                log_dir=root / "poststages" / batch["stage"] / batch["batch_id"],
+                model=config["model"],
                 model_roles=roles,
-                max_samples=max_samples,
-                resume=resume,
+                max_samples=config["max_samples"],
             )
-        except BaseException as exc:
-            batch.update(status="blocked", error_type=type(exc).__name__)
-            manifest.update(status="blocked", blocked_batch=batch["batch_id"])
-            campaign.atomic_json(path, manifest)
+        except BaseException:
+            if not was_complete:
+                batch["status"] = "interrupted"
+            manifest["status"] = "interrupted"
+            c.atomic_json(path, manifest)
             raise
-        batch.update(
-            status=result["status"],
-            log_paths=result.get("log_paths", []),
-            sample_status_counts=result.get("sample_status_counts", {}),
-        )
-        if result["status"] not in COMPLETE_BATCH_STATES:
-            manifest.update(status=result["status"], blocked_batch=batch["batch_id"])
-        else:
-            for selection in batch["selections"]:
-                manifest["progress"][selection["group_id"]] = selection["stop"]
-            manifest.pop("blocked_batch", None)
-        campaign.atomic_json(path, manifest)
-        try:
-            spending = campaign.report_cost(root)
-        except Exception as exc:
-            spending = {"status": "unavailable"}
-            campaign.emit("cost_report_unavailable", error_type=type(exc).__name__)
-        campaign.emit("poststage_progress", **progress_report(manifest), spending=spending)
-        if result["status"] not in COMPLETE_BATCH_STATES:
+        batch.update({key: result[key] for key in ("status", "log_paths", "sample_status_counts")})
+        manifest["status"] = "running" if batch["status"] == "complete" else "interrupted"
+        c.atomic_json(path, manifest)
+        if not was_complete:
+            c.emit(
+                "poststage_progress", **progress_report(manifest), spending=c.report_key_usage(root)
+            )
+        if batch["status"] != "complete":
             return progress_report(manifest)

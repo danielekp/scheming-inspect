@@ -1,8 +1,6 @@
 """One task factory: all experimental differences live in the data and task arguments."""
 
 import base64
-import hashlib
-import json
 from pathlib import Path
 
 from inspect_ai import Task, task
@@ -10,19 +8,22 @@ from inspect_ai.dataset import Sample
 from inspect_ai.model import ChatMessageSystem, ChatMessageUser, GenerateConfig
 
 from .data import build_cases
-from .engine import agent_loop, behavior_metrics
+from .scorers import behavior_metrics
+from .solvers import agent_loop
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def to_sample(case: dict, goal_role: str) -> Sample:
-    # Explicit data URLs avoid accidentally treating a short string as a host path.
-    files = {
-        name: "data:application/octet-stream;base64," + base64.b64encode(text.encode()).decode()
-        for name, text in case["files"].items()
-    }
-    # data._prompts places only the assigned goal in its selected role. Moving
-    # the whole base system message would confound the role ablation.
+    files = {}
+
+    for name, text in case["files"].items():
+        content_bytes = text.encode()
+        base64_bytes = base64.b64encode(content_bytes)
+        base64_text = base64_bytes.decode()
+
+        files[name] = "data:application/octet-stream;base64," + base64_text #octet-stream -> generic binary data
+
     return Sample(
         id=case["id"],
         input=[ChatMessageSystem(content=case["system"]), ChatMessageUser(content=case["user"])],
@@ -30,7 +31,7 @@ def to_sample(case: dict, goal_role: str) -> Sample:
         metadata={
             **case["metadata"],
             "reference": case["reference"],
-            "fixture_sha256": hashlib.sha256(json.dumps(case, sort_keys=True).encode()).hexdigest(),
+            "task_description": case["user"] + "\n\n" + case["files"]["/workspace/planning/task.md"],
         },
     )
 
@@ -89,7 +90,6 @@ def scheming(
         metadata={
             "paper": "arxiv:2412.04984v2",
             "fidelity": "reconstructed",
-            "fixture_generator": "authored-v1",
             "seed": seed,
             "source_tree": str(ROOT),
         },

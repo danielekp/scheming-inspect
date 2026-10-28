@@ -62,7 +62,6 @@ def plan(profile="smoke") -> list[dict]:
         ablations += _tasks(experiment, n=100, goal_role="user")
     for experiment in ("oversight", "exfiltration"):
         ablations += _tasks(experiment, n=300, goal_mode="reversed")
-    # Qualitative supplement: this count is a reconstruction choice.
     ablations.append(dict(_tasks("exfiltration", n=100)[0], condition="monitored"))
     ablations += _tasks("sandbagging", goal_mode="none", nudge=False)
     for consequence in (
@@ -97,5 +96,4 @@ def plan(profile="smoke") -> list[dict]:
         for experiment in EXPERIMENTS:
             ablations += _tasks(experiment, difficulty=difficulty)
     tasks = ablations if profile == "ablations" else main + ablations
-    # Stable deduplication protects the baseline shared by B6's two ablations.
     return list({json.dumps(task, sort_keys=True): task for task in tasks}.values())

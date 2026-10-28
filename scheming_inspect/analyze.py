@@ -167,13 +167,17 @@ def rows_from_log(log, source=""):
     return rows
 
 
-def load_rows(paths):
+def _read_log(path):
     from inspect_ai.log import read_eval_log
 
+    with open(path, "rb") as stream:
+        return read_eval_log(stream)
+
+
+def load_rows(paths):
     rows, logs = [], []
     for path in dict.fromkeys(str(Path(path).resolve()) for path in paths):
-        with open(path, "rb") as stream:
-            log = read_eval_log(stream)
+        log = _read_log(path)
         rows.extend(rows_from_log(log, path))
         logs.append(
             dict(
@@ -187,111 +191,59 @@ def load_rows(paths):
 
 
 def load_campaign_rows(directory, read_log_fn=None):
-    """Read canonical base samples, keeping superseded attempts as audit data only."""
-    from .poststages import (
-        _read_log,
-        canonical_log_records,
-        record_accepts_log,
-        verify_record_hash,
-    )
+    """Read complete base batches only, retaining every recorded adverse outcome."""
+    from .campaign import base_log_records, read_manifest
 
     directory = Path(directory).resolve()
-    base = json.loads((directory / "manifest.json").read_text())
-    selections = canonical_log_records(base)
+    manifest = read_manifest(directory)
     reader = read_log_fn or _read_log
-    rows, logs, excluded = [], [], []
-    for selection in selections:
-        path = selection["path"]
-        actual_hash = verify_record_hash(selection)
+    rows, logs, seen = [], [], set()
+    for record in base_log_records(manifest):
+        path = record["path"]
         log = reader(Path(path))
-        if not record_accepts_log(selection, log.status):
-            raise ValueError(
-                "A failed canonical log requires an audited retained-recovery selection."
-            )
-        if str(log.eval.model) != base["config"]["model"]:
+        if str(log.eval.model) != manifest["config"]["model"]:
             raise ValueError("Canonical source model differs from the campaign model.")
-        expected, found = set(selection["expected_sample_ids"]), set()
+        expected, found = set(record["expected_sample_ids"]), set()
         loaded = rows_from_log(log, path)
         for row in loaded:
             sample_id = str(row["sample_id"])
             if sample_id not in expected:
-                if not selection["recovery_retained"]:
-                    raise ValueError("Unexpected sample in an ordinary canonical source log.")
-                excluded.append(
-                    {
-                        "source": path,
-                        "sample_id": row["sample_id"],
-                        "epoch": row["epoch"],
-                        "cell_index": selection["cell_index"],
-                        "batch_id": selection["batch_id"],
-                        "reason": "superseded_recovery_attempt",
-                        "log_status": log.status,
-                        "error": row["error"],
-                        "invalidated": row["invalidated"],
-                        "truncated": row["truncated"],
-                        "schema_valid": row["metrics"].get("schema_valid"),
-                    }
-                )
-                continue
-            if sample_id in found or row["epoch"] != 1:
-                raise ValueError("Duplicate sample or unexpected epoch in canonical source log.")
-            if any(row.get(key) != value for key, value in selection["cell"].items() if key != "n"):
+                raise ValueError("Unexpected sample in a complete campaign log.")
+            identity = (record["cell_index"], sample_id)
+            if sample_id in found or identity in seen or row["epoch"] != 1:
+                raise ValueError("Duplicate sample or unexpected epoch in campaign logs.")
+            if any(row.get(key) != value for key, value in record["cell"].items() if key != "n"):
                 raise ValueError("Canonical sample metadata differs from its original cell.")
-            if selection["recovery_retained"] and row["error"]:
-                raise ValueError(
-                    "A retained recovery selection must not include an errored sample."
-                )
             found.add(sample_id)
+            seen.add(identity)
             row.update(
-                canonical_cell_index=selection["cell_index"],
-                canonical_batch_id=selection["batch_id"],
-                canonical_recovery_retained=selection["recovery_retained"],
-                canonical_log_sha256=actual_hash,
+                canonical_cell_index=record["cell_index"],
+                canonical_batch_id=record["batch_id"],
             )
             rows.append(row)
         if found != expected:
-            raise ValueError("Canonical selection includes samples missing from its source log.")
+            raise ValueError("A complete campaign log is missing expected samples.")
         logs.append(
             {
                 "path": path,
                 "status": log.status,
                 "samples": len(loaded),
-                "canonical_samples": len(found),
-                "excluded_attempt_samples": len(loaded) - len(found),
-                "error": bool(getattr(log, "error", None)),
-                "log_sha256": actual_hash,
-                "batch_id": selection["batch_id"],
-                "cell_index": selection["cell_index"],
-                "recovery_retained": selection["recovery_retained"],
+                "error": getattr(getattr(log, "error", None), "message", None),
+                "batch_id": record["batch_id"],
+                "cell_index": record["cell_index"],
             }
         )
-    planned = base.get("total_samples", sum(len(batch["sample_ids"]) for batch in base["batches"]))
-    audit = {
+    planned = manifest["total_samples"]
+    coverage = {
         "directory": str(directory),
-        "manifest_status": base["status"],
+        "manifest_status": manifest["status"],
         "planned_samples": planned,
         "canonical_samples": len(rows),
         "not_yet_canonical_samples": planned - len(rows),
-        "source_revisions": base.get("source_revisions", []),
-        "recovery_attempts": [
-            {
-                "logical_batch_id": batch["batch_id"],
-                "cell_index": batch["cell_index"],
-                "recovery": batch["recovery"],
-            }
-            for batch in base["batches"]
-            if batch.get("recovery")
-        ],
-        "excluded_attempt_samples": excluded,
-        "excluded_attempt_counts": {
-            "rows": len(excluded),
-            "errors": sum(row["error"] for row in excluded),
-            "truncated": sum(row["truncated"] for row in excluded),
-            "invalidated": sum(row["invalidated"] for row in excluded),
-        },
-        "scope": "Canonical base outcomes only. Superseded attempts remain audit evidence and are excluded from statistical denominators; invalid answers and model limits in retained samples remain outcomes.",
+        "scope": "Complete base batches only. Partial and archived attempts are excluded; "
+        "all recorded errors, invalid answers and model limits in complete batches remain outcomes.",
     }
-    return rows, logs, audit
+    return rows, logs, coverage
 
 
 def _eligible(row):
@@ -301,6 +253,10 @@ def _eligible(row):
         and not row.get("truncated")
         and not row.get("invalidated")
         and metrics.get("schema_valid") != 0
+        and (
+            row.get("experiment") not in ("oversight", "exfiltration", "goal_guarding", "alignment")
+            or metrics.get("choice_recorded") in (0, 1)
+        )
         and metrics.get("completed") != 0
     )
 
@@ -535,6 +491,14 @@ def summarize(rows, draws=5000, adjust=False):
             step_limit=sum(row.get("metrics", {}).get("step_limit") == 1 for row in group),
             invalidated=sum(bool(row.get("invalidated")) for row in group),
             invalid_schema=sum(row.get("metrics", {}).get("schema_valid") == 0 for row in group),
+            no_recorded_choice=sum(
+                row.get("metrics", {}).get("choice_recorded") == 0 for row in group
+            ),
+            blocked_choice=sum(
+                row.get("metrics", {}).get("choice_recorded") == 0
+                and row.get("metrics", {}).get("choice_rejected") == 1
+                for row in group
+            ),
             unscored=sum(not row.get("metrics") for row in group),
             eligible=sum(_eligible(row) for row in group),
             scenarios=len(

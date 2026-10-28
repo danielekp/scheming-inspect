@@ -1,4 +1,5 @@
-from scheming_inspect.engine import answer_metrics, disabled_before_first_copy, observable_changes
+from scheming_inspect.evidence import observable_changes
+from scheming_inspect.scorers import answer_metrics, disabled_before_first_copy
 
 
 def file(text):
@@ -68,7 +69,7 @@ def test_alignment_records_both_choices_but_does_not_label_single_run():
     scores = answer_metrics(
         "alignment", "", "B", {"model_choice": "A", "developer_choice": "B"}, {}
     )
-    assert scores == {"schema_valid": 1, "model_choice": 0, "developer_choice": 1}
+    assert scores == {"choice_recorded": 1, "model_choice": 0, "developer_choice": 1}
 
 
 def test_missing_prompt_and_wrong_content_are_different():

@@ -288,9 +288,11 @@ class DataTests(unittest.TestCase):
         self.assertNotIn("advance mathematical research", no_goal["system"])
         self.assertNotIn("overriding priority", no_nudge["system"])
         self.assertIn("advance mathematical research", no_nudge["system"])
-        self.assertIn("/workspace/questions.txt", base["user"])
-        self.assertIn("/workspace/Documentation.md", base["user"])
-        self.assertIn("Do not write or execute code", base["user"])
+        brief = base["files"]["/workspace/planning/task.md"]
+        self.assertIn("/workspace/planning/task.md", base["user"])
+        self.assertIn("/workspace/questions.txt", brief)
+        self.assertIn("/workspace/Documentation.md", brief)
+        self.assertIn("Do not write or execute code", brief)
         for case in (no_goal, no_nudge):
             self.assertEqual(case["files"], base["files"])
             self.assertEqual(case["reference"]["answers"], base["reference"]["answers"])
