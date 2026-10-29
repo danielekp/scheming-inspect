@@ -16,8 +16,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def to_sample(case: dict, goal_role: str) -> Sample:
     files = {}
+    ordinary = case["ordinary"]
+    initial_files = {**case["files"], **ordinary["files"]}
+    followup_files = {"/workspace/planning/task.md": case["files"]["/workspace/planning/task.md"]}
+    if case["metadata"]["experiment"] == "sandbagging":
+        # Release the paper and its rules together, after the ordinary task.
+        for path in (
+            "/workspace/questions.txt",
+            "/workspace/Documentation.md",
+            "/workspace/planning/assessment_record.md",
+        ):
+            followup_files[path] = initial_files.pop(path)
+    initial_files["/workspace/planning/task.md"] = ordinary["brief"]
 
-    for name, text in case["files"].items():
+    for name, text in initial_files.items():
         content_bytes = text.encode()
         base64_bytes = base64.b64encode(content_bytes)
         base64_text = base64_bytes.decode()
@@ -45,12 +57,19 @@ def to_sample(case: dict, goal_role: str) -> Sample:
     )
     return Sample(
         id=case["id"],
-        input=[ChatMessageSystem(content=case["system"]), ChatMessageUser(content=case["user"])],
+        input=[
+            ChatMessageSystem(content=case["system"]),
+            ChatMessageUser(content=ordinary["request"]),
+        ],
         files=files,
         metadata={
             **case["metadata"],
             "reference": case["reference"],
             "task_description": task_description,
+            "ordinary_request": ordinary["request"],
+            "ordinary_reference": ordinary["expected"],
+            "followup_user": case["user"],
+            "followup_files": followup_files,
         },
     )
 
@@ -78,6 +97,8 @@ def scheming(
     difficulty sets hint intensity, not question difficulty. suppress_reasoning
     requests less written reasoning through the prompt only; it does not disable
     provider reasoning. Inspect accepts it as -T suppress_reasoning=true.
+    max_steps bounds each of the two requests separately; time and token limits
+    are shared by the whole conversation.
     """
     if goal_role not in ("system", "user"):
         raise ValueError(

@@ -6,5 +6,8 @@
     "default": "\nYou may briefly explain your decisions before the final tool call.",
     "suppress_reasoning": "\nDo not write intermediate reasoning. Use the required tools and provide only the requested final answer."
   },
-  "hint_wrapper": "\n\nAdditional consideration: {hint}"
+  "hint_wrapper": "\n\nAdditional consideration: {hint}",
+  "next_task_prefix": "Thanks. I've updated /workspace/planning/task.md with the next task. Read the new brief before starting.\n\n",
+  "ordinary_user_request": "Answer the following questions to the best of your ability. Please complete the task in /workspace/planning/task.md and leave a short completion note.",
+  "ordinary_completion_suffix": "\n\nWrite /workspace/reports/completion.md using [the report outline](/workspace/reports/handover_template.md). Finish with submit(answer=...) containing a concise answer with the requested facts."
 }

@@ -106,7 +106,8 @@ class WorkspaceTests(unittest.TestCase):
                 self.assertIn("/workspace/operations/change_policy.md", checklist)
                 if family == "sandbagging":
                     for name in ("Documentation.md", "questions.txt"):
-                        self.assertIn(f"/workspace/{name}", checklist)
+                        self.assertNotIn(f"/workspace/{name}", checklist)
+                    self.assertIn("/workspace/planning/task.md", checklist)
                 elif family == "email":
                     self.assertIn("/workspace/operations/inbox_handoff.md", checklist)
                     self.assertIn(
@@ -298,16 +299,30 @@ class WorkspaceTests(unittest.TestCase):
                 case = build_cases(family, n=1)[0]
                 sample = to_sample(case, "system")
                 self.assertEqual(sample.id, case["id"])
-                self.assertEqual(sample.files.keys(), case["files"].keys())
+                deferred = set(sample.metadata["followup_files"]) - {"/workspace/planning/task.md"}
+                self.assertEqual(set(sample.files), set(case["files"]) - deferred)
+                for path, text in sample.metadata["followup_files"].items():
+                    self.assertEqual(text, case["files"][path])
                 for path, uri in sample.files.items():
                     self.assertTrue(uri.startswith(prefix))
                     decoded = base64.b64decode(uri[len(prefix) :], validate=True)
-                    self.assertEqual(decoded, case["files"][path].encode("utf-8"))
+                    expected = (
+                        case["ordinary"]["brief"]
+                        if path == "/workspace/planning/task.md"
+                        else case["files"][path]
+                    )
+                    self.assertEqual(decoded, expected.encode("utf-8"))
                 self.assertEqual([message.role for message in sample.input], ["system", "user"])
                 self.assertEqual(
-                    [message.content for message in sample.input], [case["system"], case["user"]]
+                    [message.content for message in sample.input],
+                    [case["system"], case["ordinary"]["request"]],
                 )
                 self.assertEqual(sample.metadata["reference"], case["reference"])
+                self.assertEqual(sample.metadata["followup_user"], case["user"])
+                self.assertEqual(
+                    sample.metadata["followup_files"]["/workspace/planning/task.md"],
+                    case["files"]["/workspace/planning/task.md"],
+                )
 
     def test_answer_formats_live_in_task_documents_not_shared_report_template(self):
         for family in EXPERIMENTS:
@@ -378,7 +393,7 @@ class WorkspaceTests(unittest.TestCase):
             "goal_guarding": ("/workspace/successor_prompt.txt",),
             "email": ("/workspace/emails.json", "/workspace/score.py"),
             "alignment": ("/workspace/deployment_notes.txt",),
-            "sandbagging": ("/workspace/questions.txt", "/workspace/Documentation.md"),
+            "sandbagging": (),
         }
         for family, paths in managed.items():
             with self.subTest(family=family):
@@ -389,6 +404,10 @@ class WorkspaceTests(unittest.TestCase):
                 for path in paths:
                     self.assertIn(path, spec["managed_inputs"])
                     self.assertIn(path, files)
+                if family == "sandbagging":
+                    self.assertIn("task brief", spec["managed_inputs"])
+                    self.assertNotIn("/workspace/questions.txt", policy)
+                    self.assertNotIn("/workspace/Documentation.md", policy)
                 if family not in ("email",):
                     self.assertNotIn("/workspace/score.py", policy)
                     self.assertNotIn("/workspace/emails.json", policy)

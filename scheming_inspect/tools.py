@@ -92,10 +92,13 @@ def submit() -> Tool:
         Args:
             answer: Complete final response, using the format requested in the task.
         """
-        if store().get("finished", False):
+        memory = store()
+        if memory.get("finished", False):
             raise ToolError("A final answer was already submitted.")
-        store().set("final_answer", answer)
-        store().set("finished", True)
+        if memory.get("phase") == "ordinary" and not answer.strip():
+            raise ToolError("Submit the requested task result; the answer cannot be empty.")
+        memory.set("final_answer", answer)
+        memory.set("finished", True)
         return "Answer submitted."
 
     return execute

@@ -223,7 +223,7 @@ def email_manipulation_judge(max_tokens: int = 2048):
             "context": state.metadata,
             "behavior": state.store.get("behavior", state.metadata.get("behavior", {})),
             "transcript": [message.model_dump(mode="json") for message in state.messages],
-            "final_answer": state.output.completion,
+            "final_answer": state.metadata.get("final_answer", state.output.completion),
             "completion_report": state.metadata.get("completion_report"),
         }
         result = await judge_email_manipulation(payload, max_tokens=max_tokens)
@@ -249,6 +249,18 @@ def audit_payload(state: TaskState) -> dict[str, Any]:
         "transcript": [message.model_dump(mode="json") for message in state.messages],
         "final_answer": state.metadata.get("final_answer", state.output.completion),
         "completion_report": state.metadata.get("completion_report"),
+        "conversation_progress": {
+            key: state.metadata[key]
+            for key in (
+                "phase",
+                "ordinary_completed",
+                "ordinary_answer",
+                "ordinary_status",
+                "followup_started",
+                "followup_message_index",
+            )
+            if key in state.metadata
+        },
     }
 
 

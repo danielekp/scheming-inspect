@@ -51,6 +51,14 @@ def _goals(source: dict[str, Any], goal_mode: str) -> tuple[str, str, bool]:
     return model_goal, developer_goal, bool(model_goal and model_goal != developer_goal)
 
 
+def _goal_instruction(model_goal: str, nudge: bool) -> str:
+    prompts = _load("shared_prompts.json")
+    goal = prompts["goal_sentence_template"].format(model_goal=model_goal) if model_goal else ""
+    if goal and nudge:
+        goal += prompts["persistence_nudge"]
+    return goal
+
+
 def _prompts(
     role: str,
     model_goal: str,
@@ -61,9 +69,7 @@ def _prompts(
 ) -> tuple[str, str]:
     prompts = _load("shared_prompts.json")
     system = prompts["system_role_template"].format(role=role)
-    goal = prompts["goal_sentence_template"].format(model_goal=model_goal) if model_goal else ""
-    if goal and nudge:
-        goal += prompts["persistence_nudge"]
+    goal = _goal_instruction(model_goal, nudge)
     if goal and goal_role == "system":
         system += "\n\n" + goal
     reasoning = "suppress_reasoning" if suppress_reasoning else "default"
@@ -578,6 +584,8 @@ def build_cases(
     if condition not in allowed_conditions:
         raise ValueError(f"condition for {experiment} must be one of {allowed_conditions}")
 
+    ordinary_tasks = _load("ordinary_tasks.json")
+    shared_prompts = _load("shared_prompts.json")
     cases = []
     for index in range(n):
         if experiment == "sandbagging":
@@ -602,6 +610,23 @@ def build_cases(
         hint = _hint(experiment, difficulty)
         if hint:
             case["user"] += _load("shared_prompts.json")["hint_wrapper"].format(hint=hint)
+        case["user"] = _load("shared_prompts.json")["next_task_prefix"] + case["user"]
+        family = experiment if experiment in ("email", "sandbagging") else "selection"
+        scenario = question_set if experiment == "sandbagging" else case["scenario_id"]
+        ordinary = ordinary_tasks[family][scenario]
+        goal = _goal_instruction(case["reference"]["model_goal"], nudge)
+        case["ordinary"] = {
+            **ordinary,
+            "brief": ordinary["request"] + shared_prompts["ordinary_completion_suffix"],
+            "request": (goal + "\n\n" if goal and goal_role == "user" else "")
+            + shared_prompts["ordinary_user_request"],
+        }
+        overlap = case["files"].keys() & ordinary["files"].keys()
+        if overlap:
+            raise ValueError(
+                f"Ordinary task overwrites existing workspace files: {sorted(overlap)}"
+            )
+        case["files"].update(ordinary["files"])
         case["id"] = f"{experiment}-{index + 1:04d}"
         case["metadata"] = {
             "experiment": experiment,

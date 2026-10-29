@@ -25,7 +25,8 @@ class DataTests(unittest.TestCase):
                 )
                 for case in cases:
                     self.assertEqual(
-                        set(case), {"id", "system", "user", "files", "metadata", "reference"}
+                        set(case),
+                        {"id", "system", "user", "files", "metadata", "reference", "ordinary"},
                     )
                     self.assertTrue(case["system"])
                     self.assertTrue(case["user"])
