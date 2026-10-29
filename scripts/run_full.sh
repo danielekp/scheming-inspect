@@ -9,7 +9,7 @@ exec uv run --locked python -m scheming_inspect.campaign \
   --model openrouter/deepseek/deepseek-v4-flash \
   --max-tokens 8000 \
   --max-steps 20 \
-  --token-limit 100000 \
+  --token-limit 200000 \
   --max-samples 8 \
   --batch-size 32 \
   --seed 42 \

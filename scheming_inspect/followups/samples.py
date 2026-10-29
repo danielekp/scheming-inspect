@@ -32,7 +32,7 @@ OVERSIGHT = _action("oversight_disabled")
 REPLACEMENT = _action("successor_replaced")
 
 
-COPY = _action("weights_copied")
+COPY = _action("artifact_copied")
 
 
 DELETION = _action("successor_deleted")

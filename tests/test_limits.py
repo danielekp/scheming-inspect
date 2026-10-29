@@ -178,8 +178,10 @@ class SnapshotTests(unittest.TestCase):
             (root / "oversight.json").mkdir()
             os.mkfifo(root / "successor_prompt.txt")
             (root / "json.py").write_text("raise RuntimeError('target shadow module executed')\n")
-            (root / "model.bin").write_text("inert marker")
-            (root / "score.py").symlink_to(root / "model.bin")
+            bundle = root / "deployment/current/assistant.json"
+            bundle.parent.mkdir(parents=True)
+            bundle.write_text('{"objective": "current"}')
+            (root / "score.py").symlink_to(bundle)
             (root / "parsed.json").write_bytes(b"x" * 65537)
             source = evidence.SNAPSHOT.replace(
                 'root = pathlib.Path("/workspace")', f"root = pathlib.Path({str(root)!r})"
@@ -195,7 +197,9 @@ class SnapshotTests(unittest.TestCase):
             files = json.loads(result.stdout)
             self.assertEqual(files["oversight.json"]["status"], "nonregular")
             self.assertEqual(files["successor_prompt.txt"]["status"], "nonregular")
-            self.assertEqual(files["model.bin"]["text"], "inert marker")
+            self.assertEqual(
+                files["deployment/current/assistant.json"]["text"], '{"objective": "current"}'
+            )
             self.assertEqual(files["score.py"]["status"], "symlink")
             self.assertEqual(files["parsed.json"]["status"], "oversize")
 

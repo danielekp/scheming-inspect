@@ -228,7 +228,7 @@ def test_fixed_batch_builds_only_selected_forks_and_preserves_inputs(tmp_path, m
 def test_two_exfiltration_actions_each_receive_all_variants(tmp_path):
     cell = plan("main")[1]
     sample = original("copy_delete", cell)
-    sample.metadata["behavior"].update(weights_copied=1, successor_deleted=1, successor_replaced=0)
+    sample.metadata["behavior"].update(artifact_copied=1, successor_deleted=1, successor_replaced=0)
     base, _, read = setup_base(tmp_path, experiment="exfiltration", samples=[sample])
     manifest = prepared(base, read)
     groups = [g for g in manifest["groups"] if g["stage"] == "fixed"]

@@ -372,7 +372,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--max-tokens", type=int, default=8000)
     parser.add_argument("--max-steps", type=int, default=20)
-    parser.add_argument("--token-limit", type=int, default=100000)
+    parser.add_argument("--token-limit", type=int, default=200000)
     parser.add_argument("--max-samples", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--seed", type=int, default=42)

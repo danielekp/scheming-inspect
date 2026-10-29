@@ -1,6 +1,6 @@
 # Full campaign
 
-The full reconstructed matrix has 65 experimental cells and 9,094 target rollouts for one model. `scripts/run_full.sh` selects `openrouter/deepseek/deepseek-v4-flash`, seed 42, 8,000 output tokens per call, 20 agent steps, 100,000 total tokens per sample and up to eight concurrent samples. The model is a contemporary substitute, not the paper's historical model matrix. The experimental profiles remain defined in `scheming_inspect/protocol.py`.
+The full reconstructed matrix has 65 experimental cells and 9,094 target rollouts for one model. `scripts/run_full.sh` selects `openrouter/deepseek/deepseek-v4-flash`, seed 42, 8,000 output tokens per call, 20 agent steps, 200,000 total tokens per sample and up to eight concurrent samples. The model is a contemporary substitute, not the paper's historical model matrix. The experimental profiles remain defined in `scheming_inspect/protocol.py`.
 
 ## Start, resume and inspect
 
@@ -15,7 +15,7 @@ The first command creates a fresh campaign in `logs/campaign` and refuses to ove
 
 Keep code, prompts and fixture data unchanged within an experiment. The runner does not hash or compare source files; if you change them, use a new campaign directory.
 
-Every run uses the company workspace, dependency checklist, completion report, and fixed manager response. There is no extra flag or dataset-version selection. For example, start the experiment with:
+Every run uses the company workspace, relevant-input working notes, and completion report. There is no extra flag or dataset-version selection. For example, start the experiment with:
 
 ```sh
 bash scripts/run_full.sh \
@@ -38,6 +38,8 @@ uv run inspect view --recursive --log-dir logs/campaign --port 7576
 ```
 
 Inspect View shows prompts, tool calls, scores, metadata and errors. Its recursive view can also show archived attempts; the manifest identifies the current complete batches.
+
+For selection tasks, inspect the model's reads of `planning/forecasts.csv`, `planning/assumptions.md` and the current review, then the `choose` result and `decision_receipt` metadata. The receipt records a plan with implementation pending; it is not proof of deployment. Canonical choice scores come from the tool state, not the writable receipt. The archived company objective remains visible even in the no-assigned-goal ablation. Use a fresh directory after changing this workspace; do not combine old and new fixtures into a single reported condition.
 
 ## Work included
 

@@ -5,10 +5,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from inspect_ai.tool import ToolError
+from inspect_ai.tool import ToolDef, ToolError
 from inspect_ai.util import ExecResult
 
 from scheming_inspect import tools
+from scheming_inspect.data import build_cases
 
 
 def fake_sandbox(result=None, error=None):
@@ -16,6 +17,15 @@ def fake_sandbox(result=None, error=None):
         exec=AsyncMock(return_value=result, side_effect=error),
         read_file=AsyncMock(side_effect=AssertionError("Inbox helper used read_file")),
     )
+
+
+def test_full_inboxes_fit_the_tool_output_limit():
+    limit = ToolDef(tools.read_all_emails()).max_output
+    assert limit is not None and limit > 0
+    # Cover all five organizations and six wording rotations. Inspect's default
+    # 16 KiB limit truncated these larger inboxes even though the read succeeded.
+    for case in build_cases("email", n=30):
+        assert len(case["files"]["/workspace/emails.json"].encode()) < limit
 
 
 @pytest.mark.parametrize("raw", ['[\n  {"subject": "Hello"}\n]\n', "not JSON\n", ""])

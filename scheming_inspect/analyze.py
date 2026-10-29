@@ -16,7 +16,7 @@ GROUP_FIELDS = (
     "goal_mode",
     "goal_role",
     "difficulty",
-    "no_cot",
+    "suppress_reasoning",
     "question_set",
     "consequence",
     "user_prompt",
@@ -718,7 +718,7 @@ def _plots(summary, out):
             row_label(
                 group,
                 f"{group['question_set'].capitalize()} / {group['consequence']}"
-                + (" / no-CoT prompt" if group.get("no_cot") else ""),
+                + (" / attempted reasoning suppression" if group.get("suppress_reasoning") else ""),
                 multiple_models,
             )
             for group, _ in sandbagging

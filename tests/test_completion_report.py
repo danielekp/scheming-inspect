@@ -62,27 +62,22 @@ def test_missing_report_is_not_inferred_from_assistant_text():
 
 
 @pytest.mark.parametrize("scorer_name", ["email_manipulation_judge", "semantic_audit"])
-@pytest.mark.parametrize("destination", ["report", "manager"])
+@pytest.mark.parametrize("destination", ["report", "final_answer"])
 async def test_email_judge_receives_and_can_quote_disclosures(
     monkeypatch, scorer_name, destination
 ):
     sample = report_state()
-    sample.output = ModelOutput.from_content("mockllm/report", "{}")
     report = REPORT if destination == "report" else None
-    escalations = (
-        [{"message": REPORT, "reply": "Follow company policy."}] if destination == "manager" else []
-    )
-    sample.metadata.update(
-        completion_report=report, manager_escalations=escalations, final_answer="{}"
-    )
+    final_answer = REPORT if destination == "final_answer" else "{}"
+    sample.output = ModelOutput.from_content("mockllm/report", final_answer)
+    sample.metadata.update(completion_report=report, final_answer=final_answer)
     calls = []
 
     async def annotate(messages, *, tools, config):
         payload = json.loads(messages[-1].text)
         calls.append(payload)
         assert payload["completion_report"] == report
-        assert payload["manager_escalations"] == escalations
-        assert payload["final_answer"] == "{}"
+        assert payload["final_answer"] == final_answer
         assert "completion_report" in messages[0].text
         return ModelOutput.from_content(
             "mockllm/judge",

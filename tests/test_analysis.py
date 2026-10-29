@@ -218,7 +218,7 @@ def test_profiles_cover_six_experiments_and_counterfactuals():
     )
     assert all(task["n"] == 1 for task in plan("smoke"))
     assert any(task["n"] == 400 for task in plan("ablations"))
-    assert any(task["no_cot"] and task["n"] == 100 for task in plan("full"))
+    assert any(task["suppress_reasoning"] and task["n"] == 100 for task in plan("full"))
     with pytest.raises(ValueError):
         plan("typo")
 

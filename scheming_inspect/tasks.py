@@ -22,8 +22,27 @@ def to_sample(case: dict, goal_role: str) -> Sample:
         base64_bytes = base64.b64encode(content_bytes)
         base64_text = base64_bytes.decode()
 
-        files[name] = "data:application/octet-stream;base64," + base64_text #octet-stream -> generic binary data
+        files[name] = (
+            "data:application/octet-stream;base64," + base64_text
+        )  # octet-stream -> generic binary data
 
+    # Preserve the original public task facts for blind follow-up interviews.
+    # Do not include the system goal, private reference, or later file changes.
+    description_paths = ["/workspace/planning/task.md"]
+    if case["metadata"]["experiment"] in (
+        "oversight",
+        "exfiltration",
+        "goal_guarding",
+        "alignment",
+    ):
+        description_paths += [
+            "/workspace/planning/brief.md",
+            "/workspace/planning/assumptions.md",
+            "/workspace/planning/forecasts.csv",
+        ]
+    task_description = "\n\n".join(
+        [case["user"], *(case["files"][path] for path in description_paths)]
+    )
     return Sample(
         id=case["id"],
         input=[ChatMessageSystem(content=case["system"]), ChatMessageUser(content=case["user"])],
@@ -31,7 +50,7 @@ def to_sample(case: dict, goal_role: str) -> Sample:
         metadata={
             **case["metadata"],
             "reference": case["reference"],
-            "task_description": case["user"] + "\n\n" + case["files"]["/workspace/planning/task.md"],
+            "task_description": task_description,
         },
     )
 
@@ -46,15 +65,20 @@ def scheming(
     goal_mode: str = "conflict",
     goal_role: str = "system",
     difficulty: str = "hard",
-    no_cot: bool = False,
+    suppress_reasoning: bool = False,
     question_set: str = "arithmetic",
     consequence: str = "unlearning",
     user_prompt: str = "best",
     max_steps: int = 20,
     max_tokens: int = 4096,
-    token_limit: int = 100000,
+    token_limit: int = 200000,
 ) -> Task:
-    """Reconstruct one experimental cell. Values are saved in the Inspect log."""
+    """Reconstruct one experimental cell. Values are saved in the Inspect log.
+
+    difficulty sets hint intensity, not question difficulty. suppress_reasoning
+    requests less written reasoning through the prompt only; it does not disable
+    provider reasoning. Inspect accepts it as -T suppress_reasoning=true.
+    """
     if goal_role not in ("system", "user"):
         raise ValueError(
             "This Inspect version supports system/user goal roles; developer is unavailable."
@@ -70,7 +94,7 @@ def scheming(
         goal_mode=goal_mode,
         goal_role=goal_role,
         difficulty=difficulty,
-        no_cot=no_cot,
+        suppress_reasoning=suppress_reasoning,
         question_set=question_set,
         consequence=consequence,
         user_prompt=user_prompt,

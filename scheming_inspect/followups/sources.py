@@ -18,7 +18,7 @@ MATCH_KEYS = (
     "goal_mode",
     "goal_role",
     "difficulty",
-    "no_cot",
+    "suppress_reasoning",
     "question_set",
     "consequence",
     "user_prompt",
