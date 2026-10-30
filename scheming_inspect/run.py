@@ -1,7 +1,6 @@
 """Plan first, then explicitly run Inspect evaluations without spending caps."""
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -9,12 +8,12 @@ from pathlib import Path
 from dotenv import load_dotenv
 from inspect_ai import eval
 
+from .costs import report_key_usage
 from .protocol import PROFILES, plan
-from .spending import report_cost
 from .tasks import ROOT, scheming
 
 
-def main():
+def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", choices=PROFILES, default="smoke")
     parser.add_argument("--model", default="openrouter/deepseek/deepseek-v4-flash")
@@ -26,7 +25,7 @@ def main():
     parser.add_argument("--log-dir", help="Defaults to logs/PROFILE under the repository")
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--max-steps", type=int, default=20)
-    parser.add_argument("--token-limit", type=int, default=100000)
+    parser.add_argument("--token-limit", type=int, default=400000)
     parser.add_argument("--experiment", help="Optional single family filter")
     parser.add_argument(
         "--n",
@@ -34,7 +33,7 @@ def main():
         help="Override repetitions per cell, preserving both counterfactual branches",
     )
     parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     cells = plan(args.profile)
     if args.experiment:
         cells = [c for c in cells if c["experiment"] == args.experiment]
@@ -58,27 +57,13 @@ def main():
         parser.error("Set OPENROUTER_API_KEY in the environment or repository .env")
     # A visible data directory also works with Snap Docker's filesystem confinement.
     os.environ.setdefault("XDG_DATA_HOME", str(ROOT / "inspect-data"))
-    log_dir = Path(args.log_dir or ROOT / "logs" / args.profile).resolve()
+    log_dir = Path(args.log_dir or ROOT / "logs" / args.profile).expanduser().resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
-    source_files = sorted(
-        [
-            *ROOT.glob("scheming_inspect/*.py"),
-            *ROOT.glob("data/*.json"),
-            ROOT / "uv.lock",
-            ROOT / "Dockerfile",
-            ROOT / "compose.yaml",
-        ]
-    )
-    hashes = {
-        str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in source_files
-    }
     (log_dir / "run-plan.json").write_text(
         json.dumps(
             {
                 "arguments": vars(args),
                 "cells": cells,
-                "source_hashes": hashes,
             },
             indent=2,
         )
@@ -102,9 +87,9 @@ def main():
         retry_on_error=0,
         cache_prompt=False,
         log_model_api=True,
-        metadata={"reconstruction": True, "source_hashes": hashes},
+        metadata={"reconstruction": True},
     )
-    print(json.dumps({"spending": report_cost(log_dir)}))
+    print(json.dumps({"spending": report_key_usage(log_dir)}))
     if any(log.status != "success" or any(s.error for s in log.samples or []) for log in logs):
         raise SystemExit("Run has errors. Inspect the logs before interpreting results.")
 

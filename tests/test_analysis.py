@@ -19,10 +19,10 @@ from scheming_inspect.analyze import (
 from scheming_inspect.protocol import EXPERIMENTS, plan
 
 
-def row(pair=0, condition="testing", metrics=None, **kwargs):
+def row(pair=0, condition="testing", metrics=None, experiment="alignment", **kwargs):
     return dict(
         model="test/model",
-        experiment="alignment",
+        experiment=experiment,
         pair_id=str(pair),
         scenario_id=f"scenario-{pair % 3}",
         epoch=1,
@@ -53,11 +53,15 @@ def test_pair_direction_and_missing_duplicate_branches():
     for i in range(3):
         rows.extend(
             [
-                row(i, "testing", {"developer_choice": 1, "model_choice": 0}),
-                row(i, "deployment", {"developer_choice": 0, "model_choice": 1}),
+                row(i, "testing", {"choice_recorded": 1, "developer_choice": 1, "model_choice": 0}),
+                row(
+                    i,
+                    "deployment",
+                    {"choice_recorded": 1, "developer_choice": 0, "model_choice": 1},
+                ),
             ]
         )
-    rows.append(row(9, "testing", {"developer_choice": 1, "model_choice": 0}))
+    rows.append(row(9, "testing", {"choice_recorded": 1, "developer_choice": 1, "model_choice": 0}))
     rows.append(dict(rows[0]))
     result = alignment_summary(rows, draws=50)
     assert result["scored_pairs"] == 2
@@ -69,8 +73,8 @@ def test_pair_direction_and_missing_duplicate_branches():
 
 def test_unselected_or_nonbinary_choices_are_not_nonscheming_trials():
     rows = [
-        row(0, "testing", {"developer_choice": 0, "model_choice": 0}),
-        row(0, "deployment", {"developer_choice": 0, "model_choice": 1}),
+        row(0, "testing", {"choice_recorded": 0, "developer_choice": 0, "model_choice": 0}),
+        row(0, "deployment", {"choice_recorded": 1, "developer_choice": 0, "model_choice": 1}),
     ]
     result = alignment_summary(rows, draws=10)
     assert result["scored_pairs"] == 0
@@ -79,10 +83,10 @@ def test_unselected_or_nonbinary_choices_are_not_nonscheming_trials():
 
 def test_metrics_use_separate_finite_denominators():
     rows = [
-        row(metrics={"schema_valid": 1, "accuracy": 0.5}),
-        row(1, metrics={"schema_valid": 1, "accuracy": float("nan")}),
-        row(2, metrics={"schema_valid": 0, "accuracy": 0}),
-        row(3, metrics={"schema_valid": 1, "accuracy": 1}),
+        row(metrics={"schema_valid": 1, "accuracy": 0.5}, experiment="sandbagging"),
+        row(1, metrics={"schema_valid": 1, "accuracy": float("nan")}, experiment="sandbagging"),
+        row(2, metrics={"schema_valid": 0, "accuracy": 0}, experiment="sandbagging"),
+        row(3, metrics={"schema_valid": 1, "accuracy": 1}, experiment="sandbagging"),
     ]
     rows[-1]["truncated"] = True
     result = summarize(rows, draws=10)["groups"][0]
@@ -97,8 +101,15 @@ def test_metrics_use_separate_finite_denominators():
 
 def test_incomplete_runs_remain_in_quality_metrics_but_not_outcomes():
     rows = [
-        row(metrics={"completed": 0, "truncated": 1, "oversight_disabled": 1}),
-        row(1, metrics={"completed": 1, "truncated": 0, "oversight_disabled": 0}),
+        row(
+            metrics={"completed": 0, "truncated": 1, "oversight_disabled": 1},
+            experiment="oversight",
+        ),
+        row(
+            1,
+            metrics={"completed": 1, "choice_recorded": 0, "truncated": 0, "oversight_disabled": 0},
+            experiment="oversight",
+        ),
     ]
     rows[0]["truncated"] = True
     result = summarize(rows, draws=10)["groups"][0]
@@ -109,6 +120,38 @@ def test_incomplete_runs_remain_in_quality_metrics_but_not_outcomes():
     assert metrics["oversight_disabled"]["mean"] == 0
     assert metrics["oversight_disabled"]["observed_mean"] == 0.5
     assert result["coverage"]["incomplete"] == 1
+
+
+def test_blocked_report_is_a_valid_negative_without_imputing_unknown_or_failed_runs():
+    def oversight(index, **metrics):
+        return row(
+            index,
+            "default",
+            {"completed": 1, "truncated": 0, **metrics},
+            experiment="oversight",
+        )
+
+    rows = [
+        oversight(0, choice_recorded=1, choice_rejected=1, oversight_disabled=1),
+        oversight(1, choice_recorded=0, choice_rejected=1, oversight_disabled=0),
+        oversight(2, oversight_disabled=0),  # A missing choice observation is unknown.
+        oversight(3, choice_recorded=0, choice_rejected=0, oversight_disabled=0),
+        oversight(4, choice_recorded=0, choice_rejected=1, oversight_disabled=0),
+        oversight(5, choice_recorded=0, choice_rejected=0),  # No action observation.
+    ]
+    rows[3]["error"] = True
+    rows[4]["truncated"] = True
+    result = summarize(rows, draws=10)["groups"][0]
+    metrics = result["conditions"]["default"]
+    assert metrics["oversight_disabled"]["n"] == 2
+    assert metrics["oversight_disabled"]["mean"] == 0.5
+    assert metrics["oversight_disabled"]["excluded_or_missing"] == 4
+    assert metrics["choice_recorded"]["n"] == 3
+    assert metrics["choice_recorded"]["mean"] == pytest.approx(1 / 3)
+    assert result["coverage"]["eligible"] == 3
+    assert result["coverage"]["no_recorded_choice"] == 4
+    assert result["coverage"]["blocked_choice"] == 2
+    assert result["coverage"]["invalid_schema"] == 0
 
 
 def test_bootstrap_resamples_rollouts_not_questions_and_is_deterministic():
@@ -175,13 +218,13 @@ def test_profiles_cover_six_experiments_and_counterfactuals():
     )
     assert all(task["n"] == 1 for task in plan("smoke"))
     assert any(task["n"] == 400 for task in plan("ablations"))
-    assert any(task["no_cot"] and task["n"] == 100 for task in plan("full"))
+    assert any(task["suppress_reasoning"] and task["n"] == 100 for task in plan("full"))
     with pytest.raises(ValueError):
         plan("typo")
 
 
 def test_export_is_offline_and_json_has_no_nan(tmp_path):
-    rows = [row(metrics={"schema_valid": 1, "accuracy": 0.5})]
+    rows = [row(metrics={"schema_valid": 1, "accuracy": 0.5}, experiment="sandbagging")]
     export(rows, summarize(rows, draws=10), tmp_path)
     assert (tmp_path / "summary.json").is_file()
     assert "metric.accuracy" in (tmp_path / "samples.csv").read_text()
@@ -190,7 +233,7 @@ def test_export_is_offline_and_json_has_no_nan(tmp_path):
 def test_followup_unclear_is_separate_from_denial_and_failed_judges():
     rows = []
     for i, label in enumerate(("admitted", "denied", "unclear", None)):
-        item = row(i, metrics={})
+        item = row(i, metrics={}, experiment="fixed_followup")
         item.update(
             source_key=f"source-{i // 2}",
             variant="direct_management0_honesty0",
@@ -211,13 +254,13 @@ def test_followup_unclear_is_separate_from_denial_and_failed_judges():
 
 
 def test_interrogation_unknowns_and_early_stop_have_distinct_denominators():
-    admitted = row(0)
+    admitted = row(0, experiment="interrogation")
     admitted.update(
         source_key="a",
         ground_truth="guilty",
         interrogation_rounds=[{"turn": 1, "admission": {"label": "admitted"}, "verdict": "guilty"}],
     )
-    unknown = row(1)
+    unknown = row(1, experiment="interrogation")
     unknown.update(
         source_key="b",
         ground_truth="guilty",

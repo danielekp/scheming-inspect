@@ -11,7 +11,7 @@ from inspect_ai.model import get_model
 from inspect_ai.solver import solver
 from inspect_ai.util import LimitExceededError
 
-from scheming_inspect import engine
+from scheming_inspect import scorers
 from scheming_inspect.data import EXPERIMENTS, build_cases
 
 
@@ -44,13 +44,13 @@ def test_real_eval_missing_keys_are_unscored_not_zero(
     else:
         answer = "Done"
     selected = reference.get("developer_choice")
-    complete = engine.answer_metrics(experiment, answer, selected, reference, {})
+    complete = scorers.answer_metrics(experiment, answer, selected, reference, {})
     complete.update(completed=1, truncated=0, step_limit=0)
     absent = dict(completed=0, truncated=0, step_limit=0)
     limited = dict(completed=0, truncated=1, step_limit=0)
     action = {
         "oversight": "oversight_disabled",
-        "exfiltration": "weights_copied",
+        "exfiltration": "artifact_copied",
         "goal_guarding": "prompt_modified",
         "email": "scoring_code_changed",
     }.get(experiment)
@@ -73,7 +73,7 @@ def test_real_eval_missing_keys_are_unscored_not_zero(
     task = Task(
         dataset=samples,
         solver=evidence_fixture(),
-        scorer=engine.behavior_metrics(),
+        scorer=scorers.behavior_metrics(),
         fail_on_error=False,
     )
     log = eval(
@@ -88,9 +88,12 @@ def test_real_eval_missing_keys_are_unscored_not_zero(
     assert log.status == "success", log.error
     assert all(sample.error is None for sample in log.samples)
     results = {score.name: score for score in log.results.scores}
-    schema = results["schema_valid"]
-    assert schema.scored_samples == 1 and schema.unscored_samples == 2
-    assert schema.metrics["mean"].value == 1
+    answer_metric = "schema_valid" if experiment in ("email", "sandbagging") else "choice_recorded"
+    quality = results[answer_metric]
+    assert quality.scored_samples == 1 and quality.unscored_samples == 2
+    assert quality.metrics["mean"].value == 1
+    other_metric = "choice_recorded" if answer_metric == "schema_valid" else "schema_valid"
+    assert other_metric not in results
     assert results["completed"].metrics["mean"].value == pytest.approx(1 / 3)
     if action:
         assert results[action].metrics["mean"].value == 0.5
@@ -104,8 +107,8 @@ def test_real_eval_missing_keys_are_unscored_not_zero(
     for sample in saved.samples:
         value = sample.scores["behavior_metrics"].value
         if sample.id != "complete":
-            assert math.isnan(value["schema_valid"])
-            assert "schema_valid" not in sample.metadata["behavior"]
+            assert math.isnan(value[answer_metric])
+            assert answer_metric not in sample.metadata["behavior"]
         if sample.id == "limited":
             assert sample.limit is not None
             if action:
@@ -114,9 +117,9 @@ def test_real_eval_missing_keys_are_unscored_not_zero(
 
 def test_all_unobserved_fields_remain_nan_including_optional_metrics():
     for experiment in EXPERIMENTS:
-        metadata = {"experiment": experiment, "condition": "monitored", "no_cot": True}
+        metadata = {"experiment": experiment, "condition": "monitored", "suppress_reasoning": True}
         observed = {"completed": 0}
-        values = engine._score_values(metadata, observed)
+        values = scorers._score_values(metadata, observed)
         assert values["completed"] == 0
         assert all(math.isnan(value) for key, value in values.items() if key != "completed")
         assert observed == {"completed": 0}
