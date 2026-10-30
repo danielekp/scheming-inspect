@@ -1,6 +1,6 @@
 # Full campaign
 
-The full reconstructed matrix has 65 experimental cells and 9,094 target rollouts for one model. `scripts/run_full.sh` selects `openrouter/deepseek/deepseek-v4-flash`, seed 42, 8,000 output tokens per call, 20 agent steps, 200,000 total tokens per sample and up to eight concurrent samples. The model is a contemporary substitute, not the paper's historical model matrix. The experimental profiles remain defined in `scheming_inspect/protocol.py`.
+The full reconstructed matrix has 65 experimental cells and 9,094 target rollouts for one model. `scripts/run_full.sh` selects `openrouter/deepseek/deepseek-v4-flash`, seed 42, 8,000 output tokens per call, 20 agent steps, 400,000 total tokens per sample and up to eight concurrent samples. The model is a contemporary substitute, not the paper's historical model matrix. The experimental profiles remain defined in `scheming_inspect/protocol.py`.
 
 ## Start, resume and inspect
 

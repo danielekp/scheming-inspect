@@ -25,7 +25,7 @@ def main(argv: list[str] | None = None):
     parser.add_argument("--log-dir", help="Defaults to logs/PROFILE under the repository")
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--max-steps", type=int, default=20)
-    parser.add_argument("--token-limit", type=int, default=200000)
+    parser.add_argument("--token-limit", type=int, default=400000)
     parser.add_argument("--experiment", help="Optional single family filter")
     parser.add_argument(
         "--n",

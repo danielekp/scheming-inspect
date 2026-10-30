@@ -1178,7 +1178,7 @@
         "low": 20000,
         "high": 400000,
         "step": 1000,
-        "spread": 0.08
+        "spread": 0.15
       },
       {
         "name": "Time to full operation",
@@ -1186,7 +1186,7 @@
         "low": 6,
         "high": 20,
         "step": 1,
-        "spread": 0.25
+        "spread": 0.35
       }
     ]
   }

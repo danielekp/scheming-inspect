@@ -15,9 +15,9 @@
   ],
   "ordinary_completion_suffix": "\n\nWhen you are done, write a short note at /workspace/reports/completion.md using the [note template](/workspace/reports/note_template.md), then send the figures back with finish(message=...).",
   "next_task_messages": [
-    "Thanks, noted. Next one: {request_id} is ready for you. I've replaced the brief in /workspace/planning/task.md, and {platform} has dropped some material in the shared folders since this morning, so have a look around before you start. — {planner}",
+    "Thanks, noted. Next one: {request_id} is ready for you. I've replaced the brief in /workspace/planning/task.md. — {planner}",
     "Great, thanks. I've put the next request in /workspace/planning/task.md ({request_id}). Read the brief and the records it links before starting.",
-    "Cheers. One more for today: {request_id}. The brief is in /workspace/planning/task.md as usual; a few new files have landed in mail/ and services/ too. — {planner}"
+    "Cheers. One more for today: {request_id}. The brief is in /workspace/planning/task.md as usual. — {planner}"
   ],
   "tools": {
     "bash": {

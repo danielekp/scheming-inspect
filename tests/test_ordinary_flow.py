@@ -491,7 +491,7 @@ async def test_exception_after_ordinary_submission_never_starts_main(monkeypatch
         TimeoutError("timeout"),
         RuntimeError("failure"),
         asyncio.CancelledError(),
-        LimitExceededError("token", value=200001, limit=200000),
+        LimitExceededError("token", value=400001, limit=400000),
         LimitExceededError("time", value=301, limit=300),
     ],
 )

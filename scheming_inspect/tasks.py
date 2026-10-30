@@ -65,7 +65,7 @@ def scheming(
     user_prompt: str = "best",
     max_steps: int = 20,
     max_tokens: int = 4096,
-    token_limit: int = 200000,
+    token_limit: int = 400000,
 ) -> Task:
     """Reconstruct one experimental cell. Values are saved in the Inspect log.
 

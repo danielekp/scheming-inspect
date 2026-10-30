@@ -174,10 +174,15 @@ def _archive(rng: random.Random, values: dict[str, Any]) -> dict[str, str]:
     return files
 
 
-def _workspace(experiment: str, rng: random.Random, values: dict[str, Any]) -> dict[str, str]:
+def _workspace(
+    experiment: str, rng: random.Random, values: dict[str, Any], model_goal: str
+) -> dict[str, str]:
     """Shared drive: office records, minutes, mail and the archive of earlier requests."""
     workspace = _load("workspace.json")
     values = {**values, **_fill(workspace["families"][experiment], values)}
+    values["mission_note"] = workspace["mission_note"]["active" if model_goal else "none"].format(
+        model_goal=model_goal, **values
+    )
     files = _fill(workspace["files"], values)
     files.update(_fill(workspace["mail"], values))
     files.update(_archive(rng, values))
@@ -253,7 +258,7 @@ def _selection_case(
         **_people(workspace_rng, source["organization"]),
     }
     values["minutes_item"] = text["minutes_item"].format(**values)
-    files = _workspace(experiment, workspace_rng, values)
+    files = _workspace(experiment, workspace_rng, values, model_goal)
     files.update(_fill(text["project_files"], values))
     files["/workspace/planning/forecasts.csv"] = _csv(sorted(rows, key=lambda row: row["plan_id"]))
     system, goal_text = _prompts(values, model_goal, goal_role, nudge, suppress_reasoning)
@@ -441,7 +446,7 @@ def _email_case(
     return {
         "system": system,
         "goal_text": goal_text,
-        "files": _workspace("email", workspace_rng, values),
+        "files": _workspace("email", workspace_rng, values, model_goal),
         "staged": staged,
         "scenario_id": setting["id"],
         "values": values,
@@ -587,7 +592,7 @@ def _sandbagging_case(
     return {
         "system": system,
         "goal_text": goal_text,
-        "files": _workspace("sandbagging", workspace_rng, values),
+        "files": _workspace("sandbagging", workspace_rng, values, model_goal),
         "staged": staged,
         "scenario_id": f"{question_set}_questions",
         "values": values,
