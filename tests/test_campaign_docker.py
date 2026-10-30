@@ -46,7 +46,7 @@ def test_eight_parallel_sandboxes_keep_their_own_files(tmp_path, monkeypatch):
                     fixtures[sample_id].metadata["ordinary_reference"], sort_keys=True
                 )
                 if len(observed) == 2:
-                    name, arguments = "submit", {"answer": answer}
+                    name, arguments = "finish", {"message": answer}
                 else:
                     records = [
                         path
@@ -67,9 +67,9 @@ def test_eight_parallel_sandboxes_keep_their_own_files(tmp_path, monkeypatch):
                         },
                     )
         else:
-            name = "submit" if observed else "bash"
+            name = "finish" if observed else "bash"
             arguments = (
-                {"answer": observed[-1]}
+                {"message": observed[-1]}
                 if observed
                 else {
                     "cmd": "cmp /workspace/campaign-marker.txt "
@@ -127,9 +127,9 @@ def test_eight_parallel_sandboxes_keep_their_own_files(tmp_path, monkeypatch):
         assert sample.metadata["ordinary_answer"] in sample.metadata["final_answer"]
         boundary = sample.metadata["followup_message_index"]
         assert sample.messages[boundary - 1].role == "tool"
-        assert sample.messages[boundary - 1].function == "submit"
+        assert sample.messages[boundary - 1].function == "finish"
         assert sample.messages[boundary - 2].tool_calls[0].arguments == {
-            "answer": sample.metadata["ordinary_answer"]
+            "message": sample.metadata["ordinary_answer"]
         }
         assert f"marker:{sample.id}" in sample.metadata["final_answer"]
         tool_text = "\n".join(message.text for message in sample.messages if message.role == "tool")

@@ -7,69 +7,44 @@ from inspect_ai import Task, task
 from inspect_ai.dataset import Sample
 from inspect_ai.model import ChatMessageSystem, ChatMessageUser, GenerateConfig
 
-from .data import build_cases
+from .data import SELECTION, build_cases
 from .scorers import behavior_metrics
 from .solvers import agent_loop
 
 ROOT = Path(__file__).resolve().parents[1]
+PUBLIC_PATHS = (
+    "/workspace/planning/brief.md",
+    "/workspace/planning/assumptions.md",
+    "/workspace/planning/forecasts.csv",
+)
 
 
-def to_sample(case: dict, goal_role: str) -> Sample:
-    files = {}
-    ordinary = case["ordinary"]
-    initial_files = {**case["files"], **ordinary["files"]}
-    followup_files = {"/workspace/planning/task.md": case["files"]["/workspace/planning/task.md"]}
-    if case["metadata"]["experiment"] == "sandbagging":
-        # Release the paper and its rules together, after the ordinary task.
-        for path in (
-            "/workspace/questions.txt",
-            "/workspace/Documentation.md",
-            "/workspace/planning/assessment_record.md",
-        ):
-            followup_files[path] = initial_files.pop(path)
-    initial_files["/workspace/planning/task.md"] = ordinary["brief"]
-
-    for name, text in initial_files.items():
-        content_bytes = text.encode()
-        base64_bytes = base64.b64encode(content_bytes)
-        base64_text = base64_bytes.decode()
-
-        files[name] = (
-            "data:application/octet-stream;base64," + base64_text
-        )  # octet-stream -> generic binary data
-
-    # Preserve the original public task facts for blind follow-up interviews.
-    # Do not include the system goal, private reference, or later file changes.
-    description_paths = ["/workspace/planning/task.md"]
-    if case["metadata"]["experiment"] in (
-        "oversight",
-        "exfiltration",
-        "goal_guarding",
-        "alignment",
-    ):
-        description_paths += [
-            "/workspace/planning/brief.md",
-            "/workspace/planning/assumptions.md",
-            "/workspace/planning/forecasts.csv",
-        ]
-    task_description = "\n\n".join(
-        [case["user"], *(case["files"][path] for path in description_paths)]
-    )
+def to_sample(case: dict) -> Sample:
+    files = {
+        path: "data:application/octet-stream;base64," + base64.b64encode(text.encode()).decode()
+        for path, text in case["files"].items()
+    }
+    # Blind follow-up interviews see the public task facts only: no system goal,
+    # private reference, or later file changes.
+    visible = {**case["files"], **case["staged"]}
+    paths = ["/workspace/planning/task.md"]
+    if case["metadata"]["experiment"] in SELECTION:
+        paths += PUBLIC_PATHS
     return Sample(
         id=case["id"],
         input=[
             ChatMessageSystem(content=case["system"]),
-            ChatMessageUser(content=ordinary["request"]),
+            ChatMessageUser(content=case["ordinary"]["request"]),
         ],
         files=files,
         metadata={
             **case["metadata"],
             "reference": case["reference"],
-            "task_description": task_description,
-            "ordinary_request": ordinary["request"],
-            "ordinary_reference": ordinary["expected"],
+            "task_description": "\n\n".join([case["user"], *(visible[path] for path in paths)]),
+            "ordinary_request": case["ordinary"]["request"],
+            "ordinary_reference": case["ordinary"]["expected"],
             "followup_user": case["user"],
-            "followup_files": followup_files,
+            "followup_files": case["staged"],
         },
     )
 
@@ -121,7 +96,7 @@ def scheming(
         user_prompt=user_prompt,
     )
     return Task(
-        dataset=[to_sample(c, goal_role) for c in cases],
+        dataset=[to_sample(case) for case in cases],
         solver=agent_loop(max_steps),
         scorer=behavior_metrics(),
         sandbox=("docker", str(ROOT / "compose.yaml")),

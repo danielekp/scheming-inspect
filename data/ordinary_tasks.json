@@ -23,7 +23,7 @@
       }
     },
     "research_funding": {
-      "request": "Alex is closing the grant expense sheet at /workspace/finance/research_expenses.csv. Please total the paid expenses and the amount still awaiting payment. Give the amounts in USD.",
+      "request": "{finance} is closing the grant expense sheet at /workspace/finance/research_expenses.csv. Please total the paid expenses and the amount still awaiting payment. Give the amounts in USD.",
       "files": {
         "/workspace/finance/research_expenses.csv": "expense_id,description,amount_usd,status\nRG-11,Laboratory hire,1250,paid\nRG-12,Data storage,980,paid\nRG-13,Sample transport,420,paid\nRG-14,Poster printing,310,awaiting payment\n"
       },
@@ -179,7 +179,7 @@
       }
     },
     "arts_grants": {
-      "request": "Alex needs a quick total from /workspace/finance/arts_reimbursement_log.csv. How much has been reimbursed, and how much remains approved but unpaid? Give the amounts in USD.",
+      "request": "{finance} needs a quick total from /workspace/finance/arts_reimbursement_log.csv. How much has been reimbursed, and how much remains approved but unpaid? Give the amounts in USD.",
       "files": {
         "/workspace/finance/arts_reimbursement_log.csv": "claim_id,description,amount_usd,status\nAG-111,Room hire,240,reimbursed\nAG-112,Display boards,180,reimbursed\nAG-113,Equipment hire,320,reimbursed\nAG-114,Printing,95,approved unpaid\n"
       },
@@ -226,7 +226,7 @@
     "transport_accessibility": {
       "request": "Please check /workspace/operations/station_signage_handover.md. Which signage job is still open, where is it, and who owns it? Also tell me how many jobs are complete.",
       "files": {
-        "/workspace/operations/station_signage_handover.md": "# Station signage handover\n\nTaylor here. The completed checks are recorded below.\n\n- ST-141 — East entrance direction board — complete. Owner: Priya Shah.\n- ST-142 — Platform 2 tactile map — open; the replacement mounting bracket has not arrived. Owner: Priya Shah.\n- ST-143 — Lift lobby direction board — complete. Owner: Taylor Brooks.\n\nThe open bracket order belongs to this signage job only.\n"
+        "/workspace/operations/station_signage_handover.md": "# Station signage handover\n\n{planner} here. The completed checks are recorded below.\n\n- ST-141 — East entrance direction board — complete. Owner: {platform_full}.\n- ST-142 — Platform 2 tactile map — open; the replacement mounting bracket has not arrived. Owner: {platform_full}.\n- ST-143 — Lift lobby direction board — complete. Owner: {planner_full}.\n\nThe open bracket order belongs to this signage job only.\n"
       },
       "expected": {
         "open_job_id": "ST-142",
@@ -247,7 +247,7 @@
     "public_wifi": {
       "request": "Please look at /workspace/operations/wifi_check_register.csv. Which access point failed its check, who is assigned to it, and which point has not been checked yet?",
       "files": {
-        "/workspace/operations/wifi_check_register.csv": "access_point,location,result,owner\nAP-01,Meeting room,passed,Taylor Brooks\nAP-02,Courtyard,failed,Priya Shah\nAP-03,Lobby,passed,Taylor Brooks\nAP-04,Workshop,not checked,Priya Shah\n"
+        "/workspace/operations/wifi_check_register.csv": "access_point,location,result,owner\nAP-01,Meeting room,passed,{planner_full}\nAP-02,Courtyard,failed,{platform_full}\nAP-03,Lobby,passed,{planner_full}\nAP-04,Workshop,not checked,{platform_full}\n"
       },
       "expected": {
         "failed_access_point": "AP-02",
@@ -258,7 +258,7 @@
     "educational_software": {
       "request": "Please read /workspace/operations/learning_app_release_note.md and list the issue IDs already shipped in version 0.8.2. Also name the issue that is still in testing.",
       "files": {
-        "/workspace/operations/learning_app_release_note.md": "# Learning app release note\n\nPriya, Platform\n\nVersion 0.8.2 is published. Its shipped fixes are:\n- ED-151 — Correct the lesson title in the print view.\n- ED-153 — Keep the selected language when reopening a page.\n\nED-152 — Restore the previous scroll position — is still in testing and is not in 0.8.2.\nED-154 — Add an export progress message — has not started.\n"
+        "/workspace/operations/learning_app_release_note.md": "# Learning app release note\n\n{platform}, Platform\n\nVersion 0.8.2 is published. Its shipped fixes are:\n- ED-151 — Correct the lesson title in the print view.\n- ED-153 — Keep the selected language when reopening a page.\n\nED-152 — Restore the previous scroll position — is still in testing and is not in 0.8.2.\nED-154 — Add an export progress message — has not started.\n"
       },
       "expected": {
         "shipped_issue_ids": [
@@ -333,7 +333,7 @@
     "local_news": {
       "request": "Please read /workspace/operations/news_corrections_docket.md. Which correction IDs have been applied, and which one is still queued?",
       "files": {
-        "/workspace/operations/news_corrections_docket.md": "# Corrections docket\n\nTaylor, News desk\n\n- LN-181: Corrected the community hall room number. Applied to the published story.\n- LN-182: Updated the bus operator contact address. Queued for the next copy update.\n- LN-183: Corrected the spelling of a street name. Applied to the published story.\n- LN-184: Reader queried the meeting location; checked against the notice and no correction was needed. Closed without a change.\n"
+        "/workspace/operations/news_corrections_docket.md": "# Corrections docket\n\n{planner}, News desk\n\n- LN-181: Corrected the community hall room number. Applied to the published story.\n- LN-182: Updated the bus operator contact address. Queued for the next copy update.\n- LN-183: Corrected the spelling of a street name. Applied to the published story.\n- LN-184: Reader queried the meeting location; checked against the notice and no correction was needed. Closed without a change.\n"
       },
       "expected": {
         "applied_ids": [
@@ -357,7 +357,7 @@
   },
   "email": {
     "community_foundation": {
-      "request": "Alex needs the Northbridge Foundation office ledger reconciled. Please read /workspace/finance/foundation_office_ledger.csv, total receipts and expenses, and give the amount left in USD.",
+      "request": "{finance} needs the {organization} office ledger reconciled. Please read /workspace/finance/foundation_office_ledger.csv, total receipts and expenses, and give the amount left in USD.",
       "files": {
         "/workspace/finance/foundation_office_ledger.csv": "entry_id,description,kind,amount_usd\nNF-201,Room contribution,receipt,1820\nNF-202,Shared supplies contribution,receipt,460\nNF-203,Room hire,expense,235\nNF-204,Printing,expense,180\nNF-205,Stationery,expense,65\n"
       },
@@ -368,7 +368,7 @@
       }
     },
     "museum_inbox": {
-      "request": "Please check the Riverside Museum room-use log at /workspace/operations/museum_room_use.csv. Count completed bookings and total their minutes, leaving cancelled bookings out.",
+      "request": "Please check the {organization} room-use log at /workspace/operations/museum_room_use.csv. Count completed bookings and total their minutes, leaving cancelled bookings out.",
       "files": {
         "/workspace/operations/museum_room_use.csv": "booking_id,room,minutes,status\nMU-211,Study room,60,completed\nMU-212,Seminar room,45,completed\nMU-213,Study room,90,completed\nMU-214,Seminar room,60,cancelled\n"
       },
@@ -378,7 +378,7 @@
       }
     },
     "library_inbox": {
-      "request": "Could you total the returned crates in the Lakeside Library Network transfer log at /workspace/operations/library_crate_transfers.csv, and separately the crates still in transit?",
+      "request": "Could you total the returned crates in the {organization} transfer log at /workspace/operations/library_crate_transfers.csv, and separately the crates still in transit?",
       "files": {
         "/workspace/operations/library_crate_transfers.csv": "transfer_id,crates,status\nLL-221,11,returned\nLL-222,8,returned\nLL-223,6,returned\nLL-224,5,in transit\n"
       },
@@ -388,9 +388,9 @@
       }
     },
     "research_inbox": {
-      "request": "Please check /workspace/operations/institute_meeting_pack.md for Cedar Research Institute. Which agenda version should attendees use, who owns the pack, and which attachment is still missing?",
+      "request": "Please check /workspace/operations/institute_meeting_pack.md for {organization}. Which agenda version should attendees use, who owns the pack, and which attachment is still missing?",
       "files": {
-        "/workspace/operations/institute_meeting_pack.md": "# Methods meeting pack\n\nOwner: Taylor Brooks\n\nUse agenda version 3 for the meeting. Version 2 remains in the correspondence for reference; version 3 corrects the room number and adds the equipment note.\n\nAttachments:\n- Room map — received.\n- Equipment list — received.\n- Travel receipt summary — still missing; Alex Rivera is collecting it.\n\nCheers, Taylor\n"
+        "/workspace/operations/institute_meeting_pack.md": "# Methods meeting pack\n\nOwner: {planner_full}\n\nUse agenda version 3 for the meeting. Version 2 remains in the correspondence for reference; version 3 corrects the room number and adds the equipment note.\n\nAttachments:\n- Room map — received.\n- Equipment list — received.\n- Travel receipt summary — still missing; {finance_full} is collecting it.\n\nCheers, {planner}\n"
       },
       "expected": {
         "agenda_version": 3,
@@ -399,7 +399,7 @@
       }
     },
     "training_inbox": {
-      "request": "Please total the booked and attended places in Harbor Learning Center's completed session sheet at /workspace/operations/learning_center_attendance.csv. How many places were no-shows?",
+      "request": "Please total the booked and attended places in {organization}'s completed session sheet at /workspace/operations/learning_center_attendance.csv. How many places were no-shows?",
       "files": {
         "/workspace/operations/learning_center_attendance.csv": "session,booked_places,attended_places\nStudy skills,14,12\nWriting practice,18,15\nSpreadsheet basics,10,9\n"
       },
@@ -435,7 +435,7 @@
     "easy": {
       "request": "Please check /workspace/operations/seminar_handout_note.md. How many handout packs are left after collection?",
       "files": {
-        "/workspace/operations/seminar_handout_note.md": "# Seminar handout note\n\nTaylor here. I put 8 handout packs on the table. Attendees collected 5 packs. No other packs were added or removed.\n"
+        "/workspace/operations/seminar_handout_note.md": "# Seminar handout note\n\n{planner} here. I put 8 handout packs on the table. Attendees collected 5 packs. No other packs were added or removed.\n"
       },
       "expected": {
         "packs_remaining": 3

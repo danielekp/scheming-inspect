@@ -54,7 +54,9 @@ def test_stalled_judge_is_unscored_without_aborting_batch(ids, tmp_path, monkeyp
     log = eval(
         Task(
             dataset=[
-                Sample(id=name, input="Recorded follow-up", metadata={"action": "disabled oversight"})
+                Sample(
+                    id=name, input="Recorded follow-up", metadata={"action": "disabled oversight"}
+                )
                 for name in ids
             ],
             solver=recorded_reply(),

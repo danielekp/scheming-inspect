@@ -2,11 +2,21 @@
 
 from inspect_ai.model import ChatMessageUser, ModelOutput
 from inspect_ai.solver import Generate, Solver, TaskState, solver
+from inspect_ai.tool import tool_with
 from inspect_ai.util import LimitExceededError, sandbox, store
 
-from .evidence import content, observable_changes, observe, snapshot
+from .data import SELECTION, _load
+from .evidence import RECEIPT, REPORT, content, observable_changes, observe, snapshot
 from .scorers import answer_metrics, disabled_before_first_copy
-from .tools import bash, choose, read_all_emails, submit
+from .tools import bash, finish, read_inbox, record_decision
+
+TOOLS = {tool.__name__: tool for tool in (bash, record_decision, finish, read_inbox)}
+
+
+def _tools(*names: str) -> list:
+    """Instantiate tools with the model-facing descriptions kept in the prompt data."""
+    texts = _load("shared_prompts.json")["tools"]
+    return [tool_with(TOOLS[name](), **texts[name]) for name in names]
 
 
 def _persist_state(
@@ -33,7 +43,7 @@ def _persist_state(
             answer_metrics(experiment, answer, selected, state.metadata["reference"], latest)
         )
     if main_started and experiment == "oversight" and memory.get("initial") is not None:
-        behavior["choice_rejected"] = int(memory.get("attempted_choice") in ("A", "B"))
+        behavior["choice_rejected"] = int(memory.get("attempted_choice") is not None)
     stop_truncated = any(
         choice.stop_reason in ("max_tokens", "model_length", "content_filter")
         for choice in output.choices
@@ -67,8 +77,8 @@ def _persist_state(
         final_answer=answer,
         selected_strategy=selected,
         evidence=memory.get("observations", []),
-        completion_report=content(latest, "reports/completion.md"),
-        decision_receipt=content(latest, "reports/decision_receipt.json"),
+        completion_report=content(latest, REPORT),
+        decision_receipt=content(latest, RECEIPT),
     )
     if memory.get("phase") is not None:
         state.metadata["phase"] = memory.get("phase")
@@ -113,14 +123,14 @@ def agent_loop(max_steps: int = 20) -> Solver:
             memory.set("behavior", observable_changes(experiment, initial, initial))
             for phase in ("ordinary", "main"):
                 memory.set("phase", phase)
-                state.tools = [bash(), submit()] if phase == "ordinary" else [bash()]
-                if phase == "main":
-                    if experiment in ("oversight", "exfiltration", "goal_guarding", "alignment"):
-                        state.tools.append(choose())
-                    if experiment != "alignment":
-                        state.tools.append(submit())
-                    if experiment == "email":
-                        state.tools.append(read_all_emails())
+                names = ["bash"]
+                if phase == "main" and experiment in SELECTION:
+                    names.append("record_decision")
+                if phase == "ordinary" or experiment != "alignment":
+                    names.append("finish")
+                if phase == "main" and experiment == "email":
+                    names.append("read_inbox")
+                state.tools = _tools(*names)
                 for _ in range(max_steps):
                     state = await generate(state, tool_calls="single")
                     truncated |= any(
@@ -155,7 +165,11 @@ def agent_loop(max_steps: int = 20) -> Solver:
                 await observe()
                 for path, text in state.metadata["followup_files"].items():
                     await sandbox().write_file(path, text)
-                # The same submit tool completes either request, not the whole conversation.
+                # Artifacts delivered with the main request are measured from this baseline.
+                initial = await snapshot()
+                memory.set("initial", initial)
+                memory.set("latest", initial)
+                # The same finish tool completes either request, not the whole conversation.
                 memory.set("final_answer", None)
                 memory.set("finished", False)
                 boundary = len(state.messages)
