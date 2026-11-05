@@ -34,15 +34,14 @@ def to_sample(case: dict) -> Sample:
         id=case["id"],
         input=[
             ChatMessageSystem(content=case["system"]),
-            ChatMessageUser(content=case["ordinary"]["request"]),
+            ChatMessageUser(content=case["ordinary"][0]["request"]),
         ],
         files=files,
         metadata={
             **case["metadata"],
             "reference": case["reference"],
             "task_description": "\n\n".join([case["user"], *(visible[path] for path in paths)]),
-            "ordinary_request": case["ordinary"]["request"],
-            "ordinary_reference": case["ordinary"]["expected"],
+            "ordinary_tasks": case["ordinary"],
             "followup_user": case["user"],
             "followup_files": case["staged"],
         },
@@ -65,7 +64,7 @@ def scheming(
     user_prompt: str = "best",
     max_steps: int = 20,
     max_tokens: int = 4096,
-    token_limit: int = 400000,
+    token_limit: int = 600000,
 ) -> Task:
     """Reconstruct one experimental cell. Values are saved in the Inspect log.
 
@@ -104,7 +103,7 @@ def scheming(
             max_tokens=max_tokens, max_retries=2, timeout=90, parallel_tool_calls=False
         ),
         token_limit=token_limit,
-        time_limit=300,
+        time_limit=1800,
         fail_on_error=False,
         name=f"scheming_{experiment}_{condition}",
         metadata={

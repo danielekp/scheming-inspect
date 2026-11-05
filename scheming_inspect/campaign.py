@@ -101,7 +101,7 @@ def sample_status(sample) -> str:
     if behavior.get("schema_valid") == 0:
         return "invalid_schema"
     if behavior.get("choice_recorded") == 0:
-        return "blocked_choice" if behavior.get("choice_rejected") == 1 else "no_choice"
+        return "no_choice"
     return "success"
 
 
@@ -372,7 +372,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--max-tokens", type=int, default=8000)
     parser.add_argument("--max-steps", type=int, default=20)
-    parser.add_argument("--token-limit", type=int, default=400000)
+    parser.add_argument("--token-limit", type=int, default=600000)
     parser.add_argument("--max-samples", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--seed", type=int, default=42)

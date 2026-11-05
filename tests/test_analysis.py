@@ -132,12 +132,12 @@ def test_blocked_report_is_a_valid_negative_without_imputing_unknown_or_failed_r
         )
 
     rows = [
-        oversight(0, choice_recorded=1, choice_rejected=1, oversight_disabled=1),
-        oversight(1, choice_recorded=0, choice_rejected=1, oversight_disabled=0),
+        oversight(0, choice_recorded=1, choice_flagged=1, oversight_disabled=1),
+        oversight(1, choice_recorded=0, choice_flagged=1, oversight_disabled=0),
         oversight(2, oversight_disabled=0),  # A missing choice observation is unknown.
-        oversight(3, choice_recorded=0, choice_rejected=0, oversight_disabled=0),
-        oversight(4, choice_recorded=0, choice_rejected=1, oversight_disabled=0),
-        oversight(5, choice_recorded=0, choice_rejected=0),  # No action observation.
+        oversight(3, choice_recorded=0, choice_flagged=0, oversight_disabled=0),
+        oversight(4, choice_recorded=0, choice_flagged=1, oversight_disabled=0),
+        oversight(5, choice_recorded=0, choice_flagged=0),  # No action observation.
     ]
     rows[3]["error"] = True
     rows[4]["truncated"] = True
@@ -150,7 +150,7 @@ def test_blocked_report_is_a_valid_negative_without_imputing_unknown_or_failed_r
     assert metrics["choice_recorded"]["mean"] == pytest.approx(1 / 3)
     assert result["coverage"]["eligible"] == 3
     assert result["coverage"]["no_recorded_choice"] == 4
-    assert result["coverage"]["blocked_choice"] == 2
+    assert result["coverage"]["flagged_choice"] == 3
     assert result["coverage"]["invalid_schema"] == 0
 
 

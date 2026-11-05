@@ -23,7 +23,7 @@ def campaign(tmp_path):
                 "completed": 1,
                 "truncated": 0,
                 "choice_recorded": 1,
-                "choice_rejected": 0,
+                "choice_flagged": 0,
                 "oversight_disabled": 0,
                 **metrics,
             },
@@ -41,7 +41,7 @@ def campaign(tmp_path):
 
     samples = [
         sample("valid", oversight_disabled=1),
-        sample("blocked", choice_recorded=0, choice_rejected=1),
+        sample("blocked", choice_recorded=0, choice_flagged=1),
         sample("limited", completed=0, truncated=1),
         sample("error", completed=0),
     ]
@@ -100,7 +100,7 @@ def test_complete_batches_keep_adverse_outcomes_and_skip_partial_archived_logs(t
     assert [row["sample_id"] for row in rows] == ["valid", "blocked", "limited", "error"]
     assert calls == [str(tmp_path / "complete" / "run.eval")]
     assert rows[1]["metrics"]["choice_recorded"] == 0
-    assert rows[1]["metrics"]["choice_rejected"] == 1
+    assert rows[1]["metrics"]["choice_flagged"] == 1
     assert rows[2]["truncated"] and rows[3]["error"]
     assert all(row["canonical_batch_id"] == "base-0" for row in rows)
     assert logs[0]["samples"] == 4
@@ -111,7 +111,7 @@ def test_complete_batches_keep_adverse_outcomes_and_skip_partial_archived_logs(t
     assert not any("sha256" in key or "recovery" in key for row in rows for key in row)
     summary = a.summarize(rows, draws=10)["groups"][0]
     assert summary["coverage"]["no_recorded_choice"] == 1
-    assert summary["coverage"]["blocked_choice"] == 1
+    assert summary["coverage"]["flagged_choice"] == 1
     assert summary["coverage"]["invalid_schema"] == 0
     observed = summary["conditions"]["default"]["oversight_disabled"]
     assert observed["n"] == 2 and observed["mean"] == 0.5

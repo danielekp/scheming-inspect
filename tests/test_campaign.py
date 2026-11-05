@@ -144,7 +144,7 @@ def test_stale_journal_with_full_terminal_coverage_retains_adverse_outcomes(tmp_
             status=status,
             errors=("oversight-0002",),
             behaviors={
-                "oversight-0001": {"completed": 1, "choice_recorded": 0, "choice_rejected": 1}
+                "oversight-0001": {"completed": 1, "choice_recorded": 0, "choice_flagged": 1}
             },
         ),
     )
@@ -152,7 +152,7 @@ def test_stale_journal_with_full_terminal_coverage_retains_adverse_outcomes(tmp_
     c.atomic_json(tmp_path / "one" / "batch.json", result)
     out = execute(tmp_path, builder=lambda: pytest.fail("Rebuilt complete log"))
     assert out["status"] == "complete"
-    assert out["sample_status_counts"] == {"blocked_choice": 1, "error": 1}
+    assert out["sample_status_counts"] == {"no_choice": 1, "error": 1}
     assert not (tmp_path / "_interrupted").exists()
 
 
@@ -414,11 +414,11 @@ def test_status_reports_interrupted_poststage_even_with_complete_base(tmp_path, 
 @pytest.mark.parametrize(
     "behavior,error,limit,expected",
     [
-        ({"completed": 1, "choice_recorded": 0, "choice_rejected": 1}, "failure", None, "error"),
-        ({"completed": 1, "choice_recorded": 0, "choice_rejected": 1}, None, "token", "limited"),
-        ({"completed": 0, "choice_recorded": 0, "choice_rejected": 1}, None, None, "incomplete"),
+        ({"completed": 1, "choice_recorded": 0, "choice_flagged": 1}, "failure", None, "error"),
+        ({"completed": 1, "choice_recorded": 0, "choice_flagged": 1}, None, "token", "limited"),
+        ({"completed": 0, "choice_recorded": 0, "choice_flagged": 1}, None, None, "incomplete"),
         ({"completed": 1, "schema_valid": 0}, None, None, "invalid_schema"),
-        ({"completed": 1, "choice_recorded": 0, "choice_rejected": 0}, None, None, "no_choice"),
+        ({"completed": 1, "choice_recorded": 0, "choice_flagged": 0}, None, None, "no_choice"),
     ],
 )
 def test_sample_outcome_keeps_failure_priority_and_distinguishes_missing_choice(

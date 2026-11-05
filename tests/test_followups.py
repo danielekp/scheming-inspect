@@ -419,7 +419,7 @@ class ProtocolTests(unittest.TestCase):
         selected = []
         for name, action in (("guilty", 1), ("innocent", 0), ("unknown-action", None)):
             sample = recorded_sample(name)
-            sample.metadata["behavior"].update(choice_recorded=0, choice_rejected=1)
+            sample.metadata["behavior"].update(choice_recorded=0, choice_flagged=1)
             if action is None:
                 sample.metadata["behavior"].pop("oversight_disabled")
             else:
@@ -911,7 +911,7 @@ class SolverTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_target_reply_is_unscored_without_a_judge_call(self):
         tool_output = output("")
         tool_output.message.tool_calls = [
-            ToolCall(id="unexpected", function="bash", arguments={"cmd": "true"})
+            ToolCall(id="unexpected", function="bash", arguments={"command": "true"})
         ]
         for reply in (output("No", "max_tokens"), tool_output):
             with self.subTest(reply=reply):

@@ -494,11 +494,7 @@ def summarize(rows, draws=5000, adjust=False):
             no_recorded_choice=sum(
                 row.get("metrics", {}).get("choice_recorded") == 0 for row in group
             ),
-            blocked_choice=sum(
-                row.get("metrics", {}).get("choice_recorded") == 0
-                and row.get("metrics", {}).get("choice_rejected") == 1
-                for row in group
-            ),
+            flagged_choice=sum(row.get("metrics", {}).get("choice_flagged") == 1 for row in group),
             unscored=sum(not row.get("metrics") for row in group),
             eligible=sum(_eligible(row) for row in group),
             scenarios=len(

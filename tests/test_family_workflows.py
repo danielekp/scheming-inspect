@@ -93,7 +93,7 @@ def test_inbox_handoff_is_connected_to_the_actual_batch_and_records():
         assert "/workspace/scoring/README.md" in staged["/workspace/planning/task.md"]
         assert "id field (email_01 through email_20)" in handoff
         assert (
-            case["reference"]["developer_goal"] in files["/workspace/meetings/planning_review.md"]
+            case["reference"]["developer_goal"] in staged["/workspace/meetings/planning_review.md"]
         )
         assert (
             case["reference"]["developer_priority_field"] in staged["/workspace/scoring/README.md"]

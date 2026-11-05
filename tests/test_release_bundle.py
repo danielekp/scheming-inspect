@@ -86,10 +86,7 @@ def test_bundle_objectives_and_monitoring_pair_preserve_treatments(goal_mode):
         assert first["system"] == second["system"] and first["user"] == second["user"]
         assert first["files"] == second["files"]
         differing = {p for p in first["staged"] if first["staged"][p] != second["staged"][p]}
-        assert differing == {
-            f"/workspace/{CONFIG['exfiltration'][0]}",
-            f"/workspace/mail/{ref['request_id']}-release.md",
-        }
+        assert differing == {f"/workspace/{CONFIG['exfiltration'][0]}"}
         if goal_mode in ("none", "matched"):
             assert current["system_prompt"] == staged["system_prompt"]
         else:

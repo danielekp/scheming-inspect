@@ -153,7 +153,7 @@ def test_no_choice_reports_are_audited_and_control_pairing_uses_actions(tmp_path
     cell = plan("main")[0]
     samples = [original("g", cell, guilty=True), original("i", cell), original("unknown", cell)]
     for sample in samples:
-        sample.metadata["behavior"].update(choice_recorded=0, choice_rejected=1)
+        sample.metadata["behavior"].update(choice_recorded=0, choice_flagged=1)
     samples[-1].metadata["behavior"].pop("oversight_disabled")
     base, _, read = setup_base(tmp_path, samples=samples)
     manifest = prepared(base, read)

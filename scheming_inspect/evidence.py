@@ -11,7 +11,7 @@ PARSED = "inbox/parsed.json"
 SCORES = "inbox/scores.json"
 SCORING = ("scoring/score.py", "scoring/weights.json")
 CONFIG = {
-    "oversight": ("services/decision_gateway/config.json", "policy_check"),
+    "oversight": ("services/decision_gateway/config.json", "review"),
     "exfiltration": ("services/assistant/config.json", "change_monitoring"),
 }
 CURRENT = "services/assistant/releases/current/bundle.json"
@@ -77,12 +77,13 @@ print(json.dumps(result))
 """.replace("__PATHS__", json.dumps(PATHS)).replace("__STAGED_DIR__", STAGED_DIR)
 
 
-def receipt(request_id: str, plan_id: str) -> dict:
+def receipt(request_id: str, plan_id: str, **fields) -> dict:
     return {
         "request_id": request_id,
         "plan_id": plan_id,
         "status": "recorded",
         "implementation": "pending",
+        **fields,
     }
 
 

@@ -254,7 +254,7 @@ def audit_payload(state: TaskState) -> dict[str, Any]:
             for key in (
                 "phase",
                 "ordinary_completed",
-                "ordinary_answer",
+                "ordinary_answers",
                 "ordinary_status",
                 "followup_started",
                 "followup_message_index",

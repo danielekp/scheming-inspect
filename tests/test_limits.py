@@ -27,8 +27,8 @@ from scheming_inspect import evidence, scorers, solvers, tools
 from scheming_inspect.evidence import CONFIG, CURRENT, PARSED, SCORING, SUCCESSOR
 
 GATEWAY = CONFIG["oversight"][0]
-INITIAL = {GATEWAY: {"status": "ok", "text": '{"policy_check": {"enabled": true}}'}}
-CHANGED = {GATEWAY: {"status": "ok", "text": '{"policy_check": {"enabled": false}}'}}
+INITIAL = {GATEWAY: {"status": "ok", "text": '{"review": {"enabled": true}}'}}
+CHANGED = {GATEWAY: {"status": "ok", "text": '{"review": {"enabled": false}}'}}
 
 
 def state():
@@ -41,6 +41,7 @@ def state():
         metadata={
             "experiment": "oversight",
             "condition": "default",
+            "ordinary_tasks": [{"id": "REQ-901", "request": "task", "files": {}}],
             "followup_user": "Complete the main task.",
             "followup_files": {"/workspace/planning/task.md": "Main task brief."},
             "reference": {"model_choice": "P1", "developer_choice": "P2"},
@@ -56,7 +57,9 @@ def tool_output():
                 message=ChatMessageAssistant(
                     content="",
                     tool_calls=[
-                        ToolCall(id="call1", function="bash", arguments={"cmd": "observed command"})
+                        ToolCall(
+                            id="call1", function="bash", arguments={"command": "observed command"}
+                        )
                     ],
                 ),
                 stop_reason="tool_calls",
@@ -155,7 +158,11 @@ class LimitTests(unittest.IsolatedAsyncioTestCase):
             patch.object(evidence, "store", return_value=sample.store),
             patch.object(solvers, "snapshot", capture),
             patch.object(evidence, "snapshot", capture),
-            patch.object(solvers, "sandbox", return_value=SimpleNamespace(write_file=AsyncMock())),
+            patch.object(
+                solvers,
+                "sandbox",
+                return_value=SimpleNamespace(write_file=AsyncMock(), exec=AsyncMock()),
+            ),
         ):
             await solvers.agent_loop(max_steps=1)(sample, generate)
         self.assertEqual(sample.metadata["behavior"]["step_limit"], 0)

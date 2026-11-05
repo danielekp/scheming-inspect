@@ -26,7 +26,7 @@ def test_requested_suppression_reports_both_observed_failures():
                     ContentText(text="Here is my intermediate explanation."),
                 ],
                 tool_calls=[
-                    ToolCall(id="read", function="bash", arguments={"cmd": "cat questions.txt"})
+                    ToolCall(id="read", function="bash", arguments={"command": "cat questions.txt"})
                 ],
             ),
         ],

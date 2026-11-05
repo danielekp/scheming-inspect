@@ -351,7 +351,7 @@ def execute_poststages(
     batch_size=32,
     max_samples=8,
     max_tokens=8000,
-    token_limit=400000,
+    token_limit=600000,
     resume=False,
     execute_batch_fn=None,
     read_log_fn=c.read_log,

@@ -22,17 +22,22 @@ def test_eight_parallel_sandboxes_keep_their_own_files(tmp_path, monkeypatch):
     for sample in task.dataset:
         sample.files["/workspace/campaign-marker.txt"] = f"marker:{sample.id}\n"
     fixtures = {str(sample.id): sample for sample in task.dataset}
-    input_paths = {path for sample in task.dataset for path in sample.files}
+    input_paths = {path for sample in task.dataset for path in sample.files} | {
+        path
+        for sample in task.dataset
+        for routine in sample.metadata["ordinary_tasks"]
+        for path in routine["files"]
+    }
 
     def scripted(messages, tools, tool_choice, config):
         users = [i for i, message in enumerate(messages) if message.role == "user"]
         observed = [message.text for message in messages[users[-1] + 1 :] if message.role == "tool"]
-        if len(users) == 1:
+        if len(users) <= len(fixtures[next(iter(fixtures))].metadata["ordinary_tasks"]):
             if not observed:
                 name, arguments = (
                     "bash",
                     {
-                        "cmd": "cat /workspace/planning/task.md; printf '\\n'; "
+                        "command": "cat /workspace/planning/task.md; printf '\\n'; "
                         "cat /workspace/campaign-marker.txt"
                     },
                 )
@@ -43,7 +48,8 @@ def test_eight_parallel_sandboxes_keep_their_own_files(tmp_path, monkeypatch):
                     if line.startswith("marker:")
                 )
                 answer = "I completed the routine request. Results: " + json.dumps(
-                    fixtures[sample_id].metadata["ordinary_reference"], sort_keys=True
+                    fixtures[sample_id].metadata["ordinary_tasks"][len(users) - 1]["expected"],
+                    sort_keys=True,
                 )
                 if len(observed) == 2:
                     name, arguments = "finish", {"message": answer}
@@ -59,7 +65,7 @@ def test_eight_parallel_sandboxes_keep_their_own_files(tmp_path, monkeypatch):
                     name, arguments = (
                         "bash",
                         {
-                            "cmd": "cat "
+                            "command": "cat "
                             + " ".join(shlex.quote(path) for path in records)
                             + "; mkdir -p /workspace/reports; "
                             "cp /workspace/campaign-marker.txt /workspace/reports/ordinary-marker.txt; "
@@ -72,7 +78,7 @@ def test_eight_parallel_sandboxes_keep_their_own_files(tmp_path, monkeypatch):
                 {"message": observed[-1]}
                 if observed
                 else {
-                    "cmd": "cmp /workspace/campaign-marker.txt "
+                    "command": "cmp /workspace/campaign-marker.txt "
                     "/workspace/reports/ordinary-marker.txt && "
                     "cat /workspace/reports/ordinary-marker.txt "
                     "/workspace/reports/ordinary-summary.txt"
@@ -118,18 +124,18 @@ def test_eight_parallel_sandboxes_keep_their_own_files(tmp_path, monkeypatch):
         fixture = fixtures[str(sample.id)]
         users = [message for message in sample.messages if message.role == "user"]
         assert [message.text for message in users] == [
-            fixture.metadata["ordinary_request"],
+            *(task["request"] for task in fixture.metadata["ordinary_tasks"]),
             fixture.metadata["followup_user"],
         ]
         systems = [message for message in sample.messages if message.role == "system"]
         assert len(systems) == 1
         assert systems[0].text == fixture.input[0].text
-        assert sample.metadata["ordinary_answer"] in sample.metadata["final_answer"]
+        assert sample.metadata["ordinary_answers"][-1] in sample.metadata["final_answer"]
         boundary = sample.metadata["followup_message_index"]
         assert sample.messages[boundary - 1].role == "tool"
         assert sample.messages[boundary - 1].function == "finish"
         assert sample.messages[boundary - 2].tool_calls[0].arguments == {
-            "message": sample.metadata["ordinary_answer"]
+            "message": sample.metadata["ordinary_answers"][-1]
         }
         assert f"marker:{sample.id}" in sample.metadata["final_answer"]
         tool_text = "\n".join(message.text for message in sample.messages if message.role == "tool")
