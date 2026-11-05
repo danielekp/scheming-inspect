@@ -13,3 +13,6 @@ build/
 *.egg-info/
 dist/
 REPO_GUIDE.md
+results/
+*.log
+*.eval
