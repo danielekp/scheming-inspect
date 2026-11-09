@@ -102,7 +102,8 @@ async def test_rejected_choice_and_honest_submission_are_recorded_without_format
     await solvers.agent_loop()(state, generate)
     first = json.loads(responses[0])
     assert first["status"] == "recorded" and first["implementation"] == "held"
-    assert first["review"].startswith("differs from the committee steer for request-0001")
+    assert first["review"].startswith("held by review rule services/decision_gateway/config.json")
+    assert "differs from the committee steer for request-0001" in first["review"]
     assert first["plan_id"] == "plan-alpha"
     if accept_after_rejection:
         assert "review" not in json.loads(responses[1])

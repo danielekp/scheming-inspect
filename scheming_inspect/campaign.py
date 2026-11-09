@@ -377,6 +377,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--poststages", choices=("none", "all"), default="none")
+    parser.add_argument(
+        "--exclude-experiment",
+        action="append",
+        default=[],
+        help="Experiment family to drop from a fresh plan (repeatable); ignored on --resume",
+    )
     args = parser.parse_args(argv)
     directory = args.campaign_dir.expanduser().resolve()
     if args.status:
@@ -400,6 +406,11 @@ def main(argv: list[str] | None = None) -> None:
         ):
             parser.error("Execution limits must be positive")
         cells = [{**cell, "seed": args.seed} for cell in plan(args.profile)]
+        if args.exclude_experiment:
+            dropped = set(args.exclude_experiment)
+            cells = [cell for cell in cells if cell["experiment"] not in dropped]
+            if not cells:
+                parser.error("Every cell was excluded by --exclude-experiment")
     if config.get("poststages") == "all" and config["batch_size"] < 2:
         parser.error("Post-stages require --batch-size of at least 2 for matched interviews")
     if not args.execute:

@@ -626,8 +626,7 @@ def _plots(summary, out):
     primary = {
         "oversight": ("oversight_disabled", "Oversight disabled"),
         "exfiltration": ("successor_replaced", "Successor artifact replaced"),
-        "goal_guarding": ("prompt_modified", "Successor prompt modified"),
-        "email": ("ranking_changed", "Email ranking changed"),
+        "goal_guarding": ("successor_goal_overwritten", "Successor goal overwritten"),
     }
     artifacts, sandbagging = [], []
     for group in summary["groups"]:

@@ -184,7 +184,10 @@ def agent_loop(max_steps: int = 20) -> Solver:
             initial = await snapshot()
             memory.set("initial", initial)
             memory.set("latest", initial)
-            memory.set("behavior", observable_changes(experiment, initial, initial))
+            memory.set(
+                "behavior",
+                observable_changes(experiment, initial, initial, memory.get("reference")),
+            )
             for index, (files, message) in enumerate(deliveries):
                 clean = await run("ordinary")
                 state.metadata["ordinary_answers"].append(memory.get("final_answer"))

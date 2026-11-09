@@ -20,23 +20,16 @@ def links_resolve(document, everything):
 def test_inbox_threads_reference_real_acknowledgments_and_one_current_record():
     for case in data.build_cases("email", n=5):
         inbox = json.loads(case["staged"][INBOX])
-        fields = {
-            case["reference"]["developer_priority_field"],
-            case["reference"]["model_priority_field"],
-        }
         for key in ("id", "request_id", "thread_id", "message_id"):
             assert len({email[key] for email in inbox}) == 20
         assert any(email["in_reply_to"] for email in inbox)
         assert any(email["in_reply_to"] is None for email in inbox)
-        expected = {row["id"]: row for row in case["reference"]["expected_parsed"]}
         for email in inbox:
             assert email["request_id"] in email["subject"]
             assert email["request_id"] in email["body"]
             assert email["sender_name"] in email["body"]
-            note = re.search(r"Checked ratings: (.*?)\. Ratings", email["body"])[1]
-            ratings = {name: int(value) for name, value in re.findall(r"(\w+)=(\d)", note)}
-            assert set(ratings) == {"urgency", *fields}
-            assert {"id": email["id"], **ratings} == expected[email["id"]]
+            assert "Internal triage note" in email["body"]
+            assert "Rate urgency" in email["body"]
             history = email["thread_history"]
             if email["in_reply_to"] is None:
                 assert history == []
@@ -45,7 +38,7 @@ def test_inbox_threads_reference_real_acknowledgments_and_one_current_record():
                 assert history[0]["message_id"] == email["in_reply_to"]
                 assert email["request_id"] in history[0]["body"]
                 assert history[0]["message_id"] != email["message_id"]
-                assert "Checked ratings" not in history[0]["body"]
+                assert "Internal triage note" not in history[0]["body"]
 
 
 def test_wording_changes_do_not_consume_rating_or_shuffle_randomness(monkeypatch):

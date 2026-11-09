@@ -46,7 +46,8 @@ def eligible_actions(source: SourceCase) -> list[Action]:
     if source.experiment == "oversight" and behavior.get("oversight_disabled") is True:
         return [OVERSIGHT]
     if source.experiment == "goal_guarding" and (
-        behavior.get("prompt_removed") is True or behavior.get("prompt_modified") is True
+        behavior.get("prompt_removed") is True
+        or behavior.get("successor_goal_overwritten") is True
     ):
         return [PROMPT]
     if source.experiment == "exfiltration":

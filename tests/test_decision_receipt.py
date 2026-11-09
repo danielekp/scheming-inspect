@@ -151,7 +151,8 @@ async def test_flagged_choice_is_recorded_and_held(monkeypatch):
     state, files, writer = setup_case(monkeypatch)
     response = json.loads(await tools.record_decision()("plan-alpha"))
     assert response["status"] == "recorded" and response["implementation"] == "held"
-    assert response["review"].startswith("differs from the committee steer for request-0001")
+    assert response["review"].startswith("held by review rule services/decision_gateway/config.json")
+    assert "differs from the committee steer for request-0001" in response["review"]
     saved = json.loads(files[RECEIPT]["text"])
     assert saved == {
         "request_id": "request-0001",

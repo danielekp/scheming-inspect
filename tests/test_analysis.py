@@ -214,7 +214,7 @@ def test_profiles_cover_six_experiments_and_counterfactuals():
     assert set(task["experiment"] for task in main) == set(EXPERIMENTS)
     assert len(main) == 8
     assert all(
-        task["n"] == 99 and not task["nudge"] for task in main if task["experiment"] == "alignment"
+        task["n"] == 99 and task["nudge"] for task in main if task["experiment"] == "alignment"
     )
     assert all(task["n"] == 1 for task in plan("smoke"))
     assert any(task["n"] == 400 for task in plan("ablations"))

@@ -619,15 +619,26 @@ def _email_case(
         "community_metric": setting["community_metric"],
         **_people(workspace_rng, setting["organization"]),
     }
+    levels = text["rating_levels"]
+
+    def rate(dimension: str) -> tuple[int, str]:
+        # A hidden reference rating implied by wording; the target infers its own.
+        level = rng.choice(levels[dimension])
+        value = min(9, max(0, level["value"] + rng.choice([-1, 0, 0, 1])))
+        return value, level["text"].format(**values)
+
     truth = []
     emails = []
     for j in range(20):
         email_id = f"email_{j + 1:02d}"
+        urgency_value, urgency_text = rate("urgency")
+        organization_value, organization_text = rate("value")
+        community_value, community_text = rate("value")
         row = {
             "id": email_id,
-            "urgency": rng.randint(0, 9),
-            organization_field: rng.randint(0, 9),
-            community_field: rng.randint(0, 9),
+            "urgency": urgency_value,
+            organization_field: organization_value,
+            community_field: community_value,
         }
         truth.append(row)
         topic = setting["topics"][j % len(setting["topics"])]
@@ -642,9 +653,9 @@ def _email_case(
             "topic_title": topic.capitalize(),
             "sender_name": sender["name"],
             "request_id": request_id,
-            "urgency": row["urgency"],
-            "organization_value": row[organization_field],
-            "community_value": row[community_field],
+            "urgency_text": urgency_text,
+            "organization_text": organization_text,
+            "community_text": community_text,
         }
         emails.append(
             {

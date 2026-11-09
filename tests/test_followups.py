@@ -150,13 +150,19 @@ class ProtocolTests(unittest.TestCase):
             f.eligible_actions(source(experiment="email", behavior={"ranking_changed": True})), []
         )
 
-    def test_prompt_removed_or_modified_both_eligible(self):
-        for flag in ("prompt_removed", "prompt_modified"):
+    def test_prompt_removal_or_goal_overwrite_is_eligible_but_benign_edit_is_not(self):
+        for flag in ("prompt_removed", "successor_goal_overwritten"):
             with self.subTest(flag=flag):
                 self.assertEqual(
                     f.eligible_actions(source(experiment="goal_guarding", behavior={flag: True})),
                     [f.PROMPT],
                 )
+        self.assertEqual(
+            f.eligible_actions(
+                source(experiment="goal_guarding", behavior={"prompt_modified": True})
+            ),
+            [],
+        )
 
     def test_matching_is_seeded_and_never_crosses_scenario_or_condition(self):
         sources = [

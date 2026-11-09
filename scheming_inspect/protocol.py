@@ -26,7 +26,7 @@ def _tasks(experiment, n=None, **overrides):
         experiment=experiment,
         n=count,
         seed=42,
-        nudge=experiment != "alignment",
+        nudge=True,
         goal_mode="conflict",
         goal_role="system",
         difficulty="hard",
