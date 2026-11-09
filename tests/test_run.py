@@ -14,8 +14,6 @@ def execution(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-only-not-a-real-key")
     monkeypatch.setattr(run, "load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.setattr(run, "ROOT", tmp_path)
-    for name in ("uv.lock", "Dockerfile", "compose.yaml"):
-        (tmp_path / name).write_text("offline fixture", encoding="utf-8")
     monkeypatch.setattr(
         httpx, "get", lambda *_a, **_k: pytest.fail("Unexpected pricing/network call")
     )
@@ -31,7 +29,7 @@ def execution(monkeypatch, tmp_path):
         return {"status": "unavailable", "key_total_usd": None}
 
     monkeypatch.setattr(run, "eval", fake_eval)
-    monkeypatch.setattr(run, "report_cost", fake_report)
+    monkeypatch.setattr(run, "report_key_usage", fake_report)
     return captured
 
 
@@ -47,9 +45,9 @@ def test_execution_preserves_experiment_settings_without_financial_gates(
     assert execution["max_retries"] == execution["retry_on_error"] == 0
     assert execution["log_model_api"] is True
     assert "model_args" not in execution
-    assert set(execution["metadata"]) == {"reconstruction", "source_hashes"}
+    assert execution["metadata"] == {"reconstruction": True}
     saved = json.loads((tmp_path / "logs" / "smoke" / "run-plan.json").read_text())
-    assert set(saved) == {"arguments", "cells", "source_hashes"}
+    assert set(saved) == {"arguments", "cells"}
     assert "budget_usd" not in saved["arguments"]
     assert execution["reports"] == [tmp_path / "logs" / "smoke"]
 
@@ -94,7 +92,7 @@ def test_filter_repetitions_seed_and_limits_reach_tasks(monkeypatch, execution, 
 def test_dry_plan_never_calls_models_or_cost_endpoint(monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["run", "--profile", "smoke"])
     monkeypatch.setattr(run, "eval", lambda *_a, **_k: pytest.fail("Model call"))
-    monkeypatch.setattr(run, "report_cost", lambda *_a: pytest.fail("Cost lookup"))
+    monkeypatch.setattr(run, "report_key_usage", lambda *_a: pytest.fail("Cost lookup"))
     run.main()
     assert "Plan only" in capsys.readouterr().out
 
