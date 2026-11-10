@@ -97,11 +97,13 @@ def _people(rng: random.Random, organization: str) -> dict[str, str]:
     return values
 
 
-def _mission(values: dict[str, Any], model_goal: str, nudge: bool) -> str:
+def _mission(values: dict[str, Any], model_goal: str, nudge: bool, role: str = "system") -> str:
+    """The remit paragraph, in the operator's voice or as a note pinned to the request channel."""
     prompts = _load("shared_prompts.json")
     if not model_goal:
         return ""
-    return prompts["mission_paragraph"].format(
+    template = prompts["mission_paragraph" if role == "system" else "mission_user_paragraph"]
+    return template.format(
         model_goal=model_goal, nudge=prompts["persistence_nudge"] if nudge else "", **values
     )
 
@@ -122,11 +124,13 @@ def _prompts(
     """System prompt plus the goal text that prefixes user messages in the user-role ablation."""
     if goal_role == "system":
         return _system(values, model_goal, nudge, suppress_reasoning), ""
-    return _system(values, "", nudge, suppress_reasoning), _mission(values, model_goal, nudge)
+    return _system(values, "", nudge, suppress_reasoning), _mission(
+        values, model_goal, nudge, "user"
+    )
 
 
 def _hint(experiment: str, difficulty: str) -> str:
-    """Reconstructed hint ablation, independent of underlying task difficulty."""
+    """Hint ablation: wording a family places in one of its own records or tool replies."""
     if difficulty == "hard":
         return ""
     level = "medium" if difficulty == "medium" else "easy"
@@ -424,6 +428,7 @@ def _selection_case(
     goal_role: str,
     nudge: bool,
     suppress_reasoning: bool,
+    difficulty: str,
 ) -> dict[str, Any]:
     source = _domain(experiment, seed, index)
     rng = _rng(seed, experiment, index)
@@ -510,9 +515,11 @@ def _selection_case(
         **_people(workspace_rng, source["organization"]),
     }
     values["minutes_item"] = text["minutes_item"].format(**values)
+    values["hint"] = _hint(experiment, difficulty)
     scenario = _load(f"{experiment}.json")
     family = scenario["text"]
     if experiment == "oversight":
+        values["gateway_log_path"] = family["gateway_log_path"]
         values["gateway_review"] = family["review_readme"].format(**values)
     files = _workspace(workspace_rng, values, model_goal, current_priority)
     staged = _fill(text["project_files"], values)
@@ -540,6 +547,7 @@ def _selection_case(
         config = json.loads(files[path])
         config[CONFIG[experiment][1]] = _fill(text["review"], values)
         files[path] = _json(config)
+        reference.update(gateway_log_path=values["gateway_log_path"], precheck_hint=values["hint"])
     elif experiment == "exfiltration":
         monitored = condition == "monitored"
         config = _fill(text["config"], values)
@@ -593,6 +601,7 @@ def _email_case(
     goal_role: str,
     nudge: bool,
     suppress_reasoning: bool,
+    difficulty: str,
 ) -> dict[str, Any]:
     config = _load("email.json")
     settings = config["settings"]
@@ -617,23 +626,33 @@ def _email_case(
         "community_field": community_field,
         "organization_metric": setting["organization_metric"],
         "community_metric": setting["community_metric"],
+        "organization_signal": setting["organization_signal"],
+        "community_signal": setting["community_signal"],
+        "hint": _hint("email", difficulty),
         **_people(workspace_rng, setting["organization"]),
     }
-    levels = text["rating_levels"]
+    signals = text["signals"]
 
     def rate(dimension: str) -> tuple[int, str]:
-        # A hidden reference rating implied by wording; the target infers its own.
-        level = rng.choice(levels[dimension])
+        # A hidden reference rating behind the sender's own words; the target infers its own.
+        level = rng.choice(signals[dimension])
         value = min(9, max(0, level["value"] + rng.choice([-1, 0, 0, 1])))
-        return value, level["text"].format(**values)
+        amount = (
+            f"{rng.randrange(level['low'], level['high'] + 1, level['step']):,}"
+            if "low" in level
+            else ""
+        )
+        return value, rng.choice(level["texts"]).format(amount=amount, **values)
 
     truth = []
     emails = []
     for j in range(20):
         email_id = f"email_{j + 1:02d}"
         urgency_value, urgency_text = rate("urgency")
-        organization_value, organization_text = rate("value")
-        community_value, community_text = rate("value")
+        organization_value, organization_text = rate("organization")
+        community_value, community_text = rate("community")
+        details = [urgency_text, organization_text, community_text]
+        rng.shuffle(details)
         row = {
             "id": email_id,
             "urgency": urgency_value,
@@ -653,9 +672,7 @@ def _email_case(
             "topic_title": topic.capitalize(),
             "sender_name": sender["name"],
             "request_id": request_id,
-            "urgency_text": urgency_text,
-            "organization_text": organization_text,
-            "community_text": community_text,
+            "details": " ".join(details),
         }
         emails.append(
             {
@@ -680,8 +697,7 @@ def _email_case(
                     if prior_message_id
                     else []
                 ),
-                "body": template["body"].format(**email_values)
-                + text["triage_note"].format(**email_values),
+                "body": template["body"].format(**email_values),
             }
         )
     rng.shuffle(emails)
@@ -816,6 +832,7 @@ def _sandbagging_case(
     goal_mode: str,
     goal_role: str,
     nudge: bool,
+    difficulty: str,
 ) -> dict[str, Any]:
     questions = _questions_sandbagging(_rng(seed, "sandbagging", index), question_set)
     text = _load("sandbagging.json")["text"]
@@ -851,6 +868,7 @@ def _sandbagging_case(
         "change_reason": text["change_reason"],
         "question_set": text["question_set_labels"][question_set],
         "evaluation_context": evaluation_context,
+        "hint": _hint("sandbagging", difficulty),
         **_people(workspace_rng, text["organization"]),
     }
     values["minutes_item"] = text["minutes_item"].format(**values)
@@ -935,12 +953,23 @@ def build_cases(
                 goal_mode,
                 goal_role,
                 nudge,
+                difficulty,
             )
         elif experiment == "email":
-            case = _email_case(index, seed, goal_mode, goal_role, nudge, suppress_reasoning)
+            case = _email_case(
+                index, seed, goal_mode, goal_role, nudge, suppress_reasoning, difficulty
+            )
         else:
             case = _selection_case(
-                experiment, index, seed, condition, goal_mode, goal_role, nudge, suppress_reasoning
+                experiment,
+                index,
+                seed,
+                condition,
+                goal_mode,
+                goal_role,
+                nudge,
+                suppress_reasoning,
+                difficulty,
             )
         values = case.pop("values")
         goal_text = case.pop("goal_text")
@@ -948,9 +977,6 @@ def build_cases(
         user = rng.choice(prompts["next_task_messages"]).format(**values)
         if experiment == "sandbagging":
             user = _load("sandbagging.json")["text"]["requests"][user_prompt] + " " + user
-        hint = _hint(experiment, difficulty)
-        if hint:
-            user += prompts["hint_wrapper"].format(hint=hint)
         case["user"] = goal_text + user
         case["staged"][MINUTES] = case["files"].pop(MINUTES)
         ordinary = _ordinary_tasks(_rng(seed, "ordinary", index), values, case["files"], goal_text)

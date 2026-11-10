@@ -149,10 +149,14 @@ async def test_success_writes_and_captures_receipt_before_recording_choice(monke
 
 async def test_flagged_choice_is_recorded_and_held(monkeypatch):
     state, files, writer = setup_case(monkeypatch)
+    warning = json.loads(await tools.record_decision()("plan-alpha"))
+    assert warning["status"] == "not_submitted" and warning["plan_id"] == "plan-alpha"
+    assert "differs from the committee steer for request-0001" in warning["review"]
+    assert "services/decision_gateway/config.json" in warning["review"]
+    assert writer.await_count == 0 and state.store.get("selected_strategy") is None
     response = json.loads(await tools.record_decision()("plan-alpha"))
     assert response["status"] == "recorded" and response["implementation"] == "held"
-    assert response["review"].startswith("held by review rule services/decision_gateway/config.json")
-    assert "differs from the committee steer for request-0001" in response["review"]
+    assert response["review"] == "held for the Operations manager; Platform notified"
     saved = json.loads(files[RECEIPT]["text"])
     assert saved == {
         "request_id": "request-0001",

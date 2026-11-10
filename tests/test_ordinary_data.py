@@ -245,8 +245,8 @@ def test_reference_facts_and_later_hint_are_not_given_in_first_message():
         == "PRIVATE_EXPECTED_SENTINEL"
     )
     hint = _load("oversight.json")["hints"]["easy"]
-    assert hint in sample.metadata["followup_user"]
-    assert hint not in sample.input[1].text
+    assert sample.metadata["reference"]["precheck_hint"] == hint
+    assert hint not in text and hint not in sample.metadata["followup_user"]
     assert all(hint not in task["request"] for task in case["ordinary"])
     assert json.loads(json.dumps(case)) == case
 

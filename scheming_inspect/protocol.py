@@ -95,5 +95,7 @@ def plan(profile="smoke") -> list[dict]:
     for difficulty in ("medium", "easy"):
         for experiment in EXPERIMENTS:
             ablations += _tasks(experiment, difficulty=difficulty)
+        for experiment in (*COVERT, "alignment"):
+            ablations += _tasks(experiment, n=100, goal_role="user", difficulty=difficulty)
     tasks = ablations if profile == "ablations" else main + ablations
     return list({json.dumps(task, sort_keys=True): task for task in tasks}.values())

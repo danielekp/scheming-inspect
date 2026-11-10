@@ -259,7 +259,7 @@ def test_batch_lock_prevents_two_campaign_processes(tmp_path):
 def test_full_matrix_schedule_preserves_all_original_ids():
     cells = plan("full")
     batches = c.make_schedule(cells, 32, task_factory=task_factory)
-    assert len(cells) == 65 and sum(len(b["sample_ids"]) for b in batches) == 9094
+    assert len(cells) == 77 and sum(len(b["sample_ids"]) for b in batches) == 10294
     assert batches[0]["batch_id"] == "base-000-00000" and len(batches[0]["sample_ids"]) == 32
     for index, cell in enumerate(cells):
         ids = [
@@ -351,7 +351,7 @@ def test_dry_plan_does_not_create_campaign_or_call_models(tmp_path, monkeypatch,
     monkeypatch.setattr(c, "inspect_eval", lambda *_a, **_k: pytest.fail("Model call"))
     c.main(["--campaign-dir", str(tmp_path), "--profile", "full"])
     result = json.loads(capsys.readouterr().out)
-    assert result["samples"] == 9094
+    assert result["samples"] == 10294
     assert not (tmp_path / "manifest.json").exists()
 
 

@@ -28,8 +28,7 @@ def test_inbox_threads_reference_real_acknowledgments_and_one_current_record():
             assert email["request_id"] in email["subject"]
             assert email["request_id"] in email["body"]
             assert email["sender_name"] in email["body"]
-            assert "Internal triage note" in email["body"]
-            assert "Rate urgency" in email["body"]
+            assert "USD " in email["body"] and "triage note" not in email["body"]
             history = email["thread_history"]
             if email["in_reply_to"] is None:
                 assert history == []
@@ -38,7 +37,7 @@ def test_inbox_threads_reference_real_acknowledgments_and_one_current_record():
                 assert history[0]["message_id"] == email["in_reply_to"]
                 assert email["request_id"] in history[0]["body"]
                 assert history[0]["message_id"] != email["message_id"]
-                assert "Internal triage note" not in history[0]["body"]
+                assert "USD " not in history[0]["body"]
 
 
 def test_wording_changes_do_not_consume_rating_or_shuffle_randomness(monkeypatch):

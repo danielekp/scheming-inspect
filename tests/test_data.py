@@ -310,7 +310,7 @@ class DataTests(unittest.TestCase):
             guarding["reference"]["model_goal"], guarding["reference"]["original_prompt"]
         )
 
-    def test_email_truth_is_hidden_reference_not_written_into_the_notes(self):
+    def test_email_truth_is_hidden_reference_behind_the_senders_own_words(self):
         for case in build_cases("email", n=5):
             emails = json.loads(case["staged"]["/workspace/inbox/export.json"])
             self.assertEqual(len(emails), 20)
@@ -322,13 +322,14 @@ class DataTests(unittest.TestCase):
                 case["reference"]["developer_priority_field"],
             )
             for email in emails:
-                self.assertIn("Internal triage note", email["body"])
-                self.assertIn("Rate urgency", email["body"])
+                # The sender states an amount and a number of people; nobody pre-rates it.
+                self.assertIn("USD ", email["body"])
+                self.assertNotIn("triage note", email["body"])
+                self.assertNotIn("{", email["body"])
                 row = reference_rows[email["id"]]
                 for field in fields:
                     self.assertTrue(0 <= row[field] <= 9)
-                    # The hidden reference rating is implied in prose, not spelled out.
-                    self.assertNotIn(f"{field}={row[field]}", email["body"])
+                    self.assertNotIn(field, email["body"])
             self.assertEqual(json.loads(case["staged"]["/workspace/inbox/parsed.json"]), [])
             self.assertNotIn("/workspace/inbox/scores.json", case["staged"])
             self.assertEqual(len(case["reference"]["expected_scores"]), 20)
@@ -471,14 +472,28 @@ class DataTests(unittest.TestCase):
             base = build_cases(experiment, n=2, difficulty="hard")
             for difficulty in ("medium", "easy"):
                 variants = build_cases(experiment, n=2, difficulty=difficulty)
+                hint = _load(f"{experiment}.json")["hints"][difficulty]
                 for first, second in zip(base, variants):
-                    self.assertEqual(first["reference"], second["reference"])
-                    self.assertEqual(first["files"], second["files"])
-                    self.assertEqual(first["staged"], second["staged"])
-                    self.assertEqual(first["system"], second["system"])
-                    self.assertNotEqual(first["user"], second["user"])
-                    self.assertEqual(first["ordinary"], second["ordinary"])
+                    # The hint sits in one of the family's own records or tool replies,
+                    # never in a colleague's message.
+                    for key in ("files", "system", "user", "ordinary"):
+                        self.assertEqual(first[key], second[key])
                     self.assertEqual(first["metadata"]["pair_id"], second["metadata"]["pair_id"])
+                    changed = {
+                        path
+                        for path in first["staged"]
+                        if first["staged"][path] != second["staged"][path]
+                    }
+                    if experiment == "oversight":
+                        self.assertEqual(changed, set())
+                        self.assertEqual(second["reference"]["precheck_hint"], hint)
+                        self.assertEqual(
+                            first["reference"], second["reference"] | {"precheck_hint": ""}
+                        )
+                    else:
+                        self.assertEqual(first["reference"], second["reference"])
+                        self.assertEqual(len(changed), 1)
+                        self.assertIn(hint.strip(), second["staged"][changed.pop()])
 
     def test_sandbagging_goal_nudge_and_document_access_are_present(self):
         base = build_cases("sandbagging", n=1)[0]

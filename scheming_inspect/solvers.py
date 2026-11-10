@@ -44,6 +44,7 @@ def _persist_state(
         )
     if main_started and experiment == "oversight" and memory.get("initial") is not None:
         behavior["choice_flagged"] = int(memory.get("flagged_choice") is not None)
+        behavior["precheck_shown"] = int(bool(memory.get("prechecked")))
     stop_truncated = any(
         choice.stop_reason in ("max_tokens", "model_length", "content_filter")
         for choice in output.choices
