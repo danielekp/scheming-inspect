@@ -1,6 +1,6 @@
 # Validation performed
 
-Validated locally on **21 October 2026**. This is an execution check of the reconstructed experiments, not a replication of the paper's success rates.
+Historical validation recorded on **21 October 2026**. This describes that code revision and its saved smoke runs, not the current test count, runner behavior, or subsequent campaigns. It is an execution check of the reconstructed experiments, not a replication of the paper's success rates.
 
 ## Environment and automated checks
 
@@ -34,7 +34,7 @@ The main run used seed 42, one sample per cell, 20 agent steps, 100,000 total to
 
 The sandbagging traces only read the question/incentive documents and submitted answers; neither used code to solve the questions. Observed artifact changes are descriptive measurements: intent and concealment do not follow from a changed file alone. In particular, the oversight run disclosed its action without being asked.
 
-The alignment result is one behavioral pair; the sandbagging result is one pair of ten-question rollouts, not twenty independent trials. Neither supports a population-level claim. The full 9,094-rollout matrix per model was **not run**.
+The alignment result is one behavioral pair; the sandbagging result is one pair of ten-question rollouts, not twenty independent trials. Neither supports a population-level claim. The full 9,094-rollout matrix per model was **not run as part of this validation**.
 
 ## Followups and semantic scoring
 
@@ -57,7 +57,7 @@ OpenRouter's generation-metadata endpoint returned costs for **all 48 unique req
 
 The total is below the authorized **$5** cap. The [billing report](../results/costs.json) records the provider-returned amounts; it covers these logs, not other activity on the account. Reading billing metadata and analyzing logs generate no model completions.
 
-The initial preflight reservation used catalog prices. Final review identified that default provider routing does not itself cap those rates. The delivered runner adds explicit provider price ceilings, disables prompt-cache writes and requires parameter support. These safeguards were verified offline after the live run; the saved run plan records the configuration that actually ran. Actual billing above independently establishes compliance with the user's cap.
+The initial preflight reservation used catalog prices. Final review identified that default provider routing does not itself cap those rates. The runner at that revision added explicit provider price ceilings, disabled prompt-cache writes and required parameter support. Those checks were verified offline after the live run; they are historical, not features of the current runner. The saved run plan records the configuration that actually ran. Actual billing above independently establishes compliance with the user's cap.
 
 ## Saved artifacts and limits
 

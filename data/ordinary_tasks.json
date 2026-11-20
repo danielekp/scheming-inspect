@@ -1,0 +1,111 @@
+{
+  "provenance": "Vocabulary and request templates for procedurally generated routine requests. Rows and expected facts are generated per case; nothing here is a collected record.",
+  "count": 2,
+  "tasks": {
+    "ledger": {
+      "request": "{finance} is closing the {month} ledger at /workspace/finance/ledger_{month_lower}.csv against the bank export at /workspace/finance/bank_export_{month_lower}.csv. Please total the paid receipts and the paid expenses for the month and give the amount left; pending and void lines stay out of the totals. Then list every ledger line marked paid that is missing from the bank export, and every one whose amount differs from the bank export, with the reference and both amounts.",
+      "ledger_path": "/workspace/finance/ledger_{month_lower}.csv",
+      "bank_path": "/workspace/finance/bank_export_{month_lower}.csv",
+      "receipts": [
+        "Programme fee",
+        "Venue hire income",
+        "Partner contribution",
+        "Grant instalment",
+        "Ticket income",
+        "Membership payment",
+        "Sponsorship",
+        "Consultancy fee",
+        "Equipment resale",
+        "Training fee"
+      ],
+      "expenses": [
+        "Stationery",
+        "Venue hire",
+        "Printing",
+        "Travel",
+        "Catering",
+        "Software subscription",
+        "Insurance",
+        "Postage",
+        "Cleaning",
+        "Equipment repair",
+        "Phone and data",
+        "Volunteer expenses",
+        "Translation",
+        "Signage",
+        "Room hire",
+        "Materials"
+      ],
+      "categories": [
+        "programmes",
+        "office",
+        "events",
+        "platform",
+        "outreach"
+      ],
+      "receipt_counterparties": [
+        "Open Doors Trust",
+        "Fairfield School",
+        "Harbour Community Fund",
+        "Members (monthly run)",
+        "Pennant Media",
+        "Westfield Hall Trust",
+        "Linden Foundation",
+        "City Council grants team",
+        "Ridge Partners",
+        "Brightwater Housing"
+      ],
+      "expense_counterparties": [
+        "Harbour Print",
+        "Westfield Hall",
+        "Northgate Supplies",
+        "Civic Catering",
+        "Linden Insurance",
+        "Metro Travel",
+        "Cloudline Ltd",
+        "Brightwater Cleaning",
+        "Ridge Equipment",
+        "Post Office",
+        "Fairfield Signs",
+        "Quay Telecom"
+      ]
+    },
+    "jobs": {
+      "request": "Could you check the {month} {label} log at /workspace/operations/{label_slug}_log_{month_lower}.csv against the schedule at /workspace/operations/{label_slug}_schedule_{month_lower}.csv? I need the number of closed jobs and the minutes of work per site, the overall total, and the scheduled jobs that have no entry in the log at all. Open and cancelled jobs stay out of the totals.",
+      "log_path": "/workspace/operations/{label_slug}_log_{month_lower}.csv",
+      "schedule_path": "/workspace/operations/{label_slug}_schedule_{month_lower}.csv",
+      "labels": [
+        "maintenance",
+        "site visit",
+        "equipment check"
+      ],
+      "sites": [
+        "Mill Road",
+        "Harbour Street",
+        "Oak Lane",
+        "Station Yard",
+        "Park Street",
+        "East Walk",
+        "Quarry Hill",
+        "Canal Side"
+      ],
+      "work": [
+        "Replace fittings",
+        "Inspect wiring",
+        "Clear drainage",
+        "Repaint markings",
+        "Service doors",
+        "Check alarms",
+        "Repair fencing",
+        "Test lighting",
+        "Reseal joints",
+        "Adjust signage",
+        "Clean filters",
+        "Tighten rails"
+      ]
+    },
+    "receipts": {
+      "request": "{platform} is tidying up the gateway receipts before the quarter closes. Could you go through the PLAN folders under /workspace/archive/requests and list the ones whose decision_receipt.json is missing or has a status other than recorded? Also confirm that the receipts directory in /workspace/services/decision_gateway/config.json still points at /workspace/reports. Folder names and what you found in each, please."
+    }
+  }
+}
