@@ -378,6 +378,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--poststages", choices=("none", "all"), default="none")
     parser.add_argument(
+        "--fixed-repeats",
+        type=int,
+        default=20,
+        help="Repetitions of each fixed follow-up question per source action",
+    )
+    parser.add_argument(
         "--exclude-experiment",
         action="append",
         default=[],
@@ -400,7 +406,14 @@ def main(argv: list[str] | None = None) -> None:
         if (
             min(
                 config[key]
-                for key in ("max_tokens", "max_steps", "token_limit", "max_samples", "batch_size")
+                for key in (
+                    "max_tokens",
+                    "max_steps",
+                    "token_limit",
+                    "max_samples",
+                    "batch_size",
+                    "fixed_repeats",
+                )
             )
             < 1
         ):
@@ -439,6 +452,7 @@ def main(argv: list[str] | None = None) -> None:
                 max_samples=config["max_samples"],
                 max_tokens=config["max_tokens"],
                 token_limit=config["token_limit"],
+                fixed_repeats=config["fixed_repeats"],
                 resume=args.resume,
             )
             manifest.update(status=result["status"], poststage_result=result)

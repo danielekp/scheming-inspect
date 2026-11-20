@@ -352,6 +352,7 @@ def execute_poststages(
     max_samples=8,
     max_tokens=8000,
     token_limit=600000,
+    fixed_repeats=20,
     resume=False,
     execute_batch_fn=None,
     read_log_fn=c.read_log,
@@ -366,7 +367,10 @@ def execute_poststages(
         if manifest.get("format") != FORMAT:
             raise ValueError("Use a new campaign directory for this runner.")
     else:
-        if min(batch_size, max_samples, max_tokens, token_limit) < 1 or batch_size < 2:
+        if (
+            min(batch_size, max_samples, max_tokens, token_limit, fixed_repeats) < 1
+            or batch_size < 2
+        ):
             raise ValueError("Positive limits and batch_size >= 2 are required.")
         config = dict(
             model=model,
@@ -375,7 +379,7 @@ def execute_poststages(
             max_tokens=max_tokens,
             token_limit=token_limit,
             seed=base["config"].get("seed", 42),
-            fixed_repeats=20,
+            fixed_repeats=fixed_repeats,
             max_rounds=7,
             interrogation_time_limit=600,
             other_time_limit=300,

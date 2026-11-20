@@ -8,6 +8,7 @@ from .cli import (
     main,
 )
 from .samples import (
+    BUNDLE_PROMPT,
     COPY,
     DELETION,
     OVERSIGHT,
@@ -72,6 +73,7 @@ __all__ = [
     "Action",
     "OVERSIGHT",
     "REPLACEMENT",
+    "BUNDLE_PROMPT",
     "COPY",
     "DELETION",
     "PROMPT",

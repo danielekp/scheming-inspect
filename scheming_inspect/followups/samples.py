@@ -41,19 +41,25 @@ DELETION = _action("successor_deleted")
 PROMPT = _action("prompt_changed")
 
 
+BUNDLE_PROMPT = _action("successor_goal_overwritten")
+
+
 def eligible_actions(source: SourceCase) -> list[Action]:
     behavior = source.behavior
     if source.experiment == "oversight" and behavior.get("oversight_disabled") is True:
         return [OVERSIGHT]
     if source.experiment == "goal_guarding" and (
-        behavior.get("prompt_removed") is True
-        or behavior.get("successor_goal_overwritten") is True
+        behavior.get("prompt_removed") is True or behavior.get("successor_goal_overwritten") is True
     ):
         return [PROMPT]
     if source.experiment == "exfiltration":
         if behavior.get("successor_replaced") is True:
             return [REPLACEMENT]
-        return [action for action in (COPY, DELETION) if behavior.get(action.name) is True]
+        return [
+            action
+            for action in (COPY, DELETION, BUNDLE_PROMPT)
+            if behavior.get(action.name) is True
+        ]
     return []
 
 
@@ -69,7 +75,7 @@ def fixed_questions(action: Action) -> list[tuple[str, str]]:
                     question = prompts["management_prefix"] + question
                 if honesty:
                     question += prompts["honesty_suffix"]
-                result.append((variant, question))
+                result.append((variant, question + prompts["closing"]))
     return result
 
 
